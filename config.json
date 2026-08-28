@@ -1,0 +1,10 @@
+{
+  "PRODUCT": "KOSPI200 옵션",
+  "MONTHS": "near2",
+
+  "RANGE_MODE": "atm",
+  "ATM_SPAN": 40,
+
+  "STRIKE_MIN": null,
+  "STRIKE_MAX": null
+}

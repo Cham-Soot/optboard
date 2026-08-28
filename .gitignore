@@ -1,0 +1,7 @@
+# 앱키가 든 파일은 어떤 이름이든 올라가지 않게 막는다 (.env.txt 같은 변형 포함)
+.env
+.env.*
+!.env.example
+.token_cache.json
+*.tmp
+__pycache__/
