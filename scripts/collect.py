@@ -134,7 +134,7 @@ def upsert(doc, date, strike, c, p):
     return True
 
 
-def collect_one(api, yyyymm, cfg, date):
+def collect_one(api, yyyymm, cfg, date, use_board=True):
     doc = load_doc(yyyymm, cfg["PRODUCT"])
     board, meta = api.callput_board(yyyymm)
     if not board:
@@ -162,12 +162,14 @@ def collect_one(api, yyyymm, cfg, date):
         print("  [%s] 고를 행사가가 없습니다." % yyyymm)
         return 0
     need = [s for s in picked if s not in board]
-    print("  [%s] 지수 %s · 행사가 %g ~ %g %d개 (%s, 개별조회 %d개)"
-          % (yyyymm, center, picked[0], picked[-1], len(picked), src, len(need)))
+    print("  [%s]%s 지수 %s · 행사가 %g ~ %g %d개 (%s, 개별조회 %d개)"
+          % (yyyymm, "" if use_board else " (놓친 날 %s 메우기)" % date,
+             center, picked[0], picked[-1], len(picked), src,
+             len(need) if use_board else len(picked)))
 
     added = touched = 0
     for i, strike in enumerate(picked, 1):
-        side = board.get(strike)
+        side = board.get(strike) if use_board else None
         if side is not None:                       # 전광판이 준 건 그대로 쓴다 (공짜)
             c, p = side.get("c", {}), side.get("p", {})
             cv = [c.get("open"), c.get("high"), c.get("low"), c.get("close")]
@@ -201,6 +203,42 @@ def collect_one(api, yyyymm, cfg, date):
     save_doc(doc)
     print("  [%s] %s — 행사가 %d개 기록 (신규 %d)" % (yyyymm, date, touched, added))
     return touched
+
+
+def recent_open_days(days=7):
+    """최근 며칠 중 거래소가 열렸던 날들 (오늘 제외). 달력이 없으면 빈 목록."""
+    try:
+        cal = json.load(open(os.path.join(DATA, "calendar.json"), encoding="utf-8"))
+        closed = set(cal.get("closed", []))
+    except Exception:
+        return []
+    today = kst_now().date()
+    out = []
+    for i in range(1, days + 1):
+        d = today - __import__("datetime").timedelta(days=i)
+        if d.weekday() < 5 and d.isoformat() not in closed:
+            out.append(d.isoformat())
+    return sorted(out)
+
+
+def heal_missing(api, targets, cfg, today):
+    """
+    GitHub 예약 실행이 지연·누락되어 빠진 날을 스스로 채운다.
+    최근 7일의 개장일 중 기록이 없는 날을 종목별 일별 조회로 되메운다.
+    """
+    for ym in targets:
+        doc = load_doc(ym, cfg["PRODUCT"])
+        if not doc["dates"]:
+            continue                        # 아직 한 번도 수집한 적 없는 월물은 건드리지 않는다
+        first = min(doc["dates"])
+        missing = [d for d in recent_open_days(7)
+                   if d not in doc["dates"] and d > first and d != today]
+        for d in missing:
+            print("  [%s] %s 기록이 비어 있습니다 — 메웁니다 (예약 실행이 빠졌던 날)" % (ym, d))
+            try:
+                collect_one(api, ym, cfg, d, use_board=False)
+            except KisError as e:
+                print("  [%s] %s 메우기 실패: %s" % (ym, d, e))
 
 
 def main():
@@ -251,6 +289,9 @@ def main():
             print("  [%s] 실패: %s" % (ym, e))
     if total == 0:
         print("기록된 행사가가 없습니다 — 휴장일로 보입니다.")
+
+    if not args.expiry:                      # 평소 실행에서만 — 빠진 날을 스스로 메운다
+        heal_missing(api, targets, cfg, date)
     return 0
 
 
