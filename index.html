@@ -317,10 +317,12 @@ let memos = {};           // 이 브라우저에서 고친 메모  (localStorage
 let baseMarks = {};       // 저장소에 보관된 마킹 (data/marks.json)
 let baseMemos = {};       // 저장소에 보관된 메모  (data/marks.json)
 
+const MYDATA = /*__MYMARKS__*/null;   // 내화면.html 에만 심김 — 마킹·메모 내장 + 내 모드 강제
 const MINE_KEY = 'optboard.mine.v1';
 /* 주소 뒤에 #me 를 붙여 한 번 열면 이 브라우저는 '내 것'으로 기억됩니다 (#guest 로 해제).
    저장소에는 마킹·메모가 올라가지 않으므로, 다른 사람이 #me 로 열어도 시세표뿐입니다. */
 let isMine = (function(){
+  if(MYDATA) return true;               // 개인용 파일은 언제나 내 모드
   let h = '';
   try{ h = (location.hash || '').toLowerCase(); }catch(e){}
   let mine = null;
@@ -916,7 +918,9 @@ $('#btnXlsx').onclick=exportXlsx;
       });
     }
   }catch(e){}
-  if(isMine){
+  if(MYDATA){                                   // 파일로 열어도 동작하도록 심어 둔 것을 쓴다
+    baseMarks = MYDATA.marks || {}; baseMemos = MYDATA.memos || {};
+  }else if(isMine){
     try{
       const res=await fetch('data/marks.json',{cache:'no-store'});
       if(res.ok){ const o=await res.json(); baseMarks=o.marks||{}; baseMemos=o.memos||{}; }

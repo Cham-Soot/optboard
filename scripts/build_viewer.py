@@ -68,6 +68,17 @@ def main():
     print('index.html %.0f KB — 보관 월물 %d개, 내장 %d개'
           % (len(html) / 1024, len(docs), len(embed)))
 
+    # 개인용 화면 — 마킹·메모를 통째로 심는다. 파일로 열어도 다 보인다.
+    # .gitignore 가 막고 있어 GitHub 에는 절대 올라가지 않는다.
+    marks_p = os.path.join(DATA, 'marks.json')
+    if os.path.exists(marks_p):
+        payload = open(marks_p, encoding='utf-8').read()
+        my = html.replace('/*__MYMARKS__*/null', payload)
+        open(os.path.join(ROOT, '내화면.html'), 'w', encoding='utf-8').write(my)
+        import json as _j
+        n = len(_j.loads(payload).get('memos', {}))
+        print('내화면.html — 개인용 (마킹·메모 %d건 내장, 저장소에 안 올라감)' % n)
+
 
 if __name__ == '__main__':
     main()

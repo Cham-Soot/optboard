@@ -17,7 +17,8 @@ scripts/expiry_notice.py 만기일 계산 — 앱 배너와 GitHub 알림이 같
 scripts/backfill.py      과거 되메우기 (자동화 시작 전 구간, 빠진 날)
 scripts/build_viewer.py  데이터를 뷰어 HTML에 심어 index.html 생성
 viewer_template.html     뷰어 원본 (데이터 자리만 비어 있음)
-index.html               실제로 여는 화면 ← 이 파일만 열면 됩니다
+index.html               공개용 화면 (GitHub에 올라감 — 시세만)
+내화면.html              개인용 화면 ← 내 PC에서는 이걸 여세요 (마킹·메모 내장, 안 올라감)
 data/2507.json           월물별 데이터 (첨부해 주신 25년 7월물이 들어 있습니다)
 data/marks.json          마킹·메모 — 내 PC 에만 (.gitignore 가 막음)
 data/calendar.json       거래소 휴장일 캐시 (자동 생성)
@@ -216,6 +217,15 @@ PC를 켜 두지 않아도 매일 돌게 만드는 단계입니다.
 |---|---|---|
 | 시세 | `data/{월물}.json` | 누구나 |
 | 마킹·메모 | `data/marks.json` | **나만** (`.gitignore` 가 막음) |
+
+### 내 PC 에서는 `내화면.html`
+
+파일을 더블클릭으로 열면 브라우저 보안 규칙 때문에 옆의 `marks.json` 을 읽지 못합니다.
+그래서 `build_viewer.py` 가 **마킹·메모를 통째로 심은 개인용 화면**을 따로 만들어 둡니다.
+
+- 내 PC → **`내화면.html`** 을 여세요 (메모 다 보임, `.gitignore` 가 막아 안 올라감)
+- 웹 주소 → 공개용. 메모를 웹에서도 보려면 `내화면.html` 의 **마킹 보관 → 복사** 한 내용을
+  웹 `#me` 화면의 **마킹 보관 → 붙여넣고 복원** 으로 한 번 옮기면 그 브라우저에 저장됩니다
 
 ### 손님 모드 / 내 모드
 
