@@ -15,10 +15,15 @@ on:
       date:
         description: "기록할 날짜 (예: 2026-08-31). 비우면 오늘"
         required: false
+      retry:
+        description: "(자동 재시도 횟수 — 손대지 마세요)"
+        required: false
+        default: "0"
 
 permissions:
   contents: write
   issues: write
+  actions: write        # 연결 실패 시 스스로 다시 실행을 걸기 위해 필요
 
 concurrency:
   group: collect
@@ -84,6 +89,22 @@ jobs:
 
       - name: 뷰어 다시 만들기
         run: python3 scripts/build_viewer.py --recent 3
+
+      # 한국투자증권은 GitHub 서버 일부에서만 연결됩니다 (서버마다 IP가 달라 복불복).
+      # 연결이 막힌 서버에 걸리면, 새 서버를 배정받도록 스스로 한 번 더 실행을 겁니다.
+      - name: 연결 실패 시 다른 서버로 재시도
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          R="${{ inputs.retry }}"; R="${R:-0}"
+          if [ "$R" -lt 4 ]; then
+            echo "이 서버는 증권사에 연결되지 않았습니다 — 새 서버로 재시도를 겁니다 ($((R+1))/4)"
+            sleep 20
+            gh workflow run collect.yml --ref "${GITHUB_REF_NAME}"               -f retry="$((R+1))"               -f date="${{ inputs.date }}"               -f expiry="${{ inputs.expiry }}"
+          else
+            echo "4번 다시 시도해도 연결되지 않았습니다. 다음 예약 실행이 빠진 날을 메웁니다."
+          fi
 
       - name: 변경분 저장
         run: |
