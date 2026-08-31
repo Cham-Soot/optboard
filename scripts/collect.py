@@ -76,6 +76,18 @@ def pick_strikes(all_strikes, center, cfg):
     return [s for s in ks if s <= center][-n:] + [s for s in ks if s > center][:n]
 
 
+def check_expiry(v):
+    """월물은 YYYYMM 6자리. 날짜(2026-08-28)를 잘못 넣는 실수를 곧바로 잡는다."""
+    v = (v or "").strip()
+    if len(v) == 6 and v.isdigit() and "01" <= v[4:6] <= "12":
+        return v
+    raise SystemExit(
+        "월물 형식이 잘못됐습니다: %r\n"
+        "  월물은 YYYYMM 6자리입니다 — 예: 202609\n"
+        "  날짜를 넣으려던 것이라면 --date 2026-08-28 또는 Run workflow 의 "
+        "'기록할 날짜' 칸을 쓰세요." % v)
+
+
 def expiry_key(yyyymm):
     """202609 -> '2609'"""
     return yyyymm[2:6]
@@ -196,19 +208,30 @@ def main():
     ap.add_argument("--expiry", help="특정 월물만 (예: 202609)")
     ap.add_argument("--all", action="store_true", help="거래 중인 월물 전부")
     ap.add_argument("--date", help="기록할 날짜 (기본: 오늘, KST)")
+    ap.add_argument("--force", action="store_true",
+                    help="휴장일·주말이어도 강행")
     args = ap.parse_args()
 
     cfg = load_config()
     now = kst_now()
     date = args.date or now.strftime("%Y-%m-%d")
 
-    if now.weekday() >= 5 and not args.date:
-        print("주말입니다 — 수집을 건너뜁니다.")
-        return 0
+    if not args.date and not args.force:
+        if now.weekday() >= 5:
+            print("주말입니다 — 수집을 건너뜁니다.")
+            return 0
+        # 휴장일에 돌면 직전 영업일 시세가 오늘 날짜로 박힐 수 있다. 달력이 있으면 막는다.
+        try:
+            cal = json.load(open(os.path.join(DATA, "calendar.json"), encoding="utf-8"))
+            if date in set(cal.get("closed", [])):
+                print("%s 은 휴장일입니다 — 수집을 건너뜁니다." % date)
+                return 0
+        except Exception:
+            pass
 
     api = Kis()
     if args.expiry:
-        targets = [args.expiry]
+        targets = [check_expiry(args.expiry)]
     else:
         ex = api.option_expiries()
         if not ex:

@@ -115,6 +115,15 @@ select:hover,.btn:hover{background:var(--surface-3);border-color:var(--accent)}
 }
 .chip.past{background:var(--surface-2);color:var(--muted);border-color:var(--line-strong)}
 .chip.due{background:var(--hi-soft);color:var(--hi);border-color:var(--hi)}
+/* ---------- 손님 모드 ----------
+   주소 뒤에 #me 를 붙여 연 사람(=나)만 마킹과 메모를 씁니다.
+   그 밖의 방문자에게는 시세표만 보입니다. */
+body.guest th.mcol, body.guest td.memo,
+body.guest #btnHelp, body.guest #btnBackup,
+body.guest .toggle, body.guest .legend,
+body.guest #banner, body.guest #btnRange{display:none!important}
+body.guest td.cell{cursor:default}
+body.guest td.cell:hover .v{background:transparent}
 .btn.tiny{padding:3px 9px;font-size:11px;border-radius:999px}
 .btn.tiny.open{background:var(--accent-soft);border-color:var(--accent)}
 .banner{
@@ -270,14 +279,14 @@ td.cell.m-box-lo .v,td.cell.m-ul-lo .v{color:var(--lo);font-weight:600}
               <th class="call" colspan="4">콜 (Call)</th>
               <th>날짜</th>
               <th class="put" colspan="4">풋 (Put)</th>
-              <th colspan="2">메모</th>
+              <th class="mcol" colspan="2">메모</th>
               <th class="pad"></th>
             </tr>
             <tr class="sub">
               <th>시가</th><th>고가</th><th>저가</th><th>종가</th>
               <th>영업일</th>
               <th>시가</th><th>고가</th><th>저가</th><th>종가</th>
-              <th>메모 1</th><th>메모 2</th>
+              <th class="mcol">메모 1</th><th class="mcol">메모 2</th>
               <th class="pad"></th>
             </tr>
           </thead>
@@ -308,6 +317,24 @@ let memos = {};           // 이 브라우저에서 고친 메모  (localStorage
 let baseMarks = {};       // 저장소에 보관된 마킹 (data/marks.json)
 let baseMemos = {};       // 저장소에 보관된 메모  (data/marks.json)
 
+const MINE_KEY = 'optboard.mine.v1';
+/* 주소 뒤에 #me 를 붙여 한 번 열면 이 브라우저는 '내 것'으로 기억됩니다 (#guest 로 해제).
+   저장소에는 마킹·메모가 올라가지 않으므로, 다른 사람이 #me 로 열어도 시세표뿐입니다. */
+let isMine = (function(){
+  let h = '';
+  try{ h = (location.hash || '').toLowerCase(); }catch(e){}
+  let mine = null;
+  if(h.indexOf('guest') >= 0) mine = false;
+  else if(h.indexOf('me') >= 0) mine = true;
+  if(mine === null){                       // 주소에 표시가 없으면 지난번 선택을 따른다
+    try{ return localStorage.getItem(MINE_KEY) === '1'; }catch(e){ return false; }
+  }
+  try{ mine ? localStorage.setItem(MINE_KEY,'1') : localStorage.removeItem(MINE_KEY); }catch(e){}
+  try{ history.replaceState(null,'',location.pathname+location.search); }catch(e){}
+  return mine;                             // 주소 정리에 실패해도 판정은 그대로 유지
+})();
+/* 주소창에 #me 만 덧붙이면 브라우저가 페이지를 다시 읽지 않는다 — 직접 새로고침한다 */
+window.addEventListener('hashchange', function(){ location.reload(); });
 const MARK_KEY = 'optboard.marks.v1';
 const MEMO_KEY = 'optboard.memos.v1';
 const THEME_KEY = 'optboard.theme.v1';
@@ -542,7 +569,7 @@ function selectStrike(s){
 function cellTd(val, cid, k){
   const td=document.createElement('td');
   td.className='cell';
-  td.tabIndex=0;
+  if(isMine) td.tabIndex=0;
   td.dataset.cid=cid; td.dataset.k=k;
   const sp=document.createElement('span'); sp.className='v'; sp.textContent=fmtNum(val);
   td.appendChild(sp);
@@ -560,7 +587,7 @@ function applyMarkClass(td){
 function renderGrid(){
   const tb=$('#tbody'); tb.innerHTML='';
   const today=new Date().toISOString().slice(0,10);
-  updateRangeButton();
+  if(isMine) updateRangeButton();
   visibleDates().forEach(date=>{
     const r = cur.index[fmtStrike(curStrike)+'|'+date] || {c:[null,null,null,null],p:[null,null,null,null],memo1:'',memo2:''};
     const k = key(curStrike,date);
@@ -581,8 +608,10 @@ function renderGrid(){
     tr.appendChild(cellTd(r.p[2],'pL',k));
     tr.appendChild(plain(r.p[3]));
     // 메모
-    tr.appendChild(memoTd(k,0,r.memo1));
-    tr.appendChild(memoTd(k,1,r.memo2));
+    if(isMine){
+      tr.appendChild(memoTd(k,0,r.memo1));
+      tr.appendChild(memoTd(k,1,r.memo2));
+    }
     const pad=document.createElement('td'); pad.className='pad'; tr.appendChild(pad);
     tb.appendChild(tr);
   });
@@ -646,8 +675,9 @@ function onCellClick(td){
   tr.querySelectorAll('td.cell').forEach(applyMarkClass);
   refreshRailDot();
 }
-$('#tbody').addEventListener('click',e=>{ const td=e.target.closest('td.cell'); if(td) onCellClick(td); });
+$('#tbody').addEventListener('click',e=>{ if(!isMine) return; const td=e.target.closest('td.cell'); if(td) onCellClick(td); });
 $('#tbody').addEventListener('keydown',e=>{
+  if(!isMine) return;
   if(e.key!=='Enter'&&e.key!==' ') return;
   const td=e.target.closest('td.cell'); if(td){ e.preventDefault(); onCellClick(td); }
 });
@@ -872,6 +902,7 @@ $('#btnXlsx').onclick=exportXlsx;
    시작
    ====================================================================== */
 (async function boot(){
+  document.body.classList.toggle('guest', !isMine);
   ingest(EMBEDDED);
   CATALOG.forEach(c=>{ CAT[c.expiry]=c; });     // 내장되지 않은 지난 월물도 목록에는 뜬다
 
@@ -885,10 +916,12 @@ $('#btnXlsx').onclick=exportXlsx;
       });
     }
   }catch(e){}
-  try{
-    const res=await fetch('data/marks.json',{cache:'no-store'});
-    if(res.ok){ const o=await res.json(); baseMarks=o.marks||{}; baseMemos=o.memos||{}; }
-  }catch(e){}
+  if(isMine){
+    try{
+      const res=await fetch('data/marks.json',{cache:'no-store'});
+      if(res.ok){ const o=await res.json(); baseMarks=o.marks||{}; baseMemos=o.memos||{}; }
+    }catch(e){}
+  }
 
   if(!Object.keys(DB).length && !Object.keys(CAT).length){
     document.querySelector('.board').innerHTML='<div style="padding:40px;color:var(--muted)">데이터가 없습니다. 상단 <b>데이터 불러오기</b>로 월물 파일을 열어 주세요.</div>';

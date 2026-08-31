@@ -90,14 +90,25 @@ class Kis:
             "appkey": self.appkey,
             "appsecret": self.appsecret,
         }).encode()
-        req = urllib.request.Request(
-            self.host + "/oauth2/tokenP", data=body,
-            headers={"content-type": "application/json"}, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                res = json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            raise KisError("접근토큰 발급 실패: %s %s" % (e.code, e.read().decode()[:300]))
+        # 네트워크가 한 번 삐끗해도 그날 수집을 통째로 날리지 않도록 세 번까지 다시 시도한다
+        res, last = None, None
+        for i in range(3):
+            req = urllib.request.Request(
+                self.host + "/oauth2/tokenP", data=body,
+                headers={"content-type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    res = json.loads(r.read().decode())
+                break
+            except urllib.error.HTTPError as e:
+                raise KisError("접근토큰 발급 실패: %s %s" % (e.code, e.read().decode()[:300]))
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last = e
+                if i < 2:
+                    print("  접근토큰 발급이 지연됩니다 — 다시 시도합니다 (%d/3)" % (i + 2))
+                    time.sleep(3 * (i + 1))
+        if res is None:
+            raise KisError("접근토큰 발급 실패 (네트워크): %s" % last)
 
         tok = res.get("access_token")
         if not tok:

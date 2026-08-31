@@ -18,7 +18,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kis import Kis, KisError  # noqa: E402
 from collect import (load_config, load_doc, save_doc, upsert,
-                     pick_strikes, load_codes)  # noqa: E402
+                     pick_strikes, load_codes, check_expiry)  # noqa: E402
 from kis import implied_index  # noqa: E402
 
 
@@ -34,6 +34,7 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
+    args.expiry = check_expiry(args.expiry)
     api = Kis()
     board, meta = api.callput_board(args.expiry)
     if not board:
