@@ -218,6 +218,11 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
             if not message and day in rows:
                 try:
                     values, status = quote_values(rows[day])
+                    if status == "no_trade":
+                        existing = next((r for r in doc["rows"] if r["date"] == day
+                                         and float(r["strike"]) == float(contract["strike"])), None)
+                        if existing and any(v is not None for v in existing[contract["side"]]):
+                            raise ValueError("기존 시세와 거래량 0 응답이 상충합니다. 기존 값은 보존합니다")
                 except ValueError as exc:
                     message, status = str(exc), "invalid"
             elif message:

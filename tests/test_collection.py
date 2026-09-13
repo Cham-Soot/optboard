@@ -83,6 +83,14 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaises(collect.CollectionIncomplete):collect.collect_one(self.api,'202610',CFG,DAY)
         self.assertEqual(self.read()['rows'],[])
 
+    def test_zero_volume_does_not_certify_contradictory_existing_price(self):
+        doc=document();collect.upsert(doc,DAY,1100,[1,2,1,2],[20,22,18,21]);collect.save_doc(doc)
+        self.api.daily_ohlc.return_value=[{**price(),'volume':0}]
+        with self.assertRaises(collect.CollectionIncomplete):
+            collect.collect_one(self.api,'202610',CFG,DAY)
+        self.assertEqual(self.read()['rows'][0]['c'],[1,2,1,2])
+        self.assertEqual(self.read()['collection'][DAY]['status'],'incomplete')
+
     def test_historical_index_selects_historical_range(self):
         with patch.object(collect,'load_codes',return_value={100:{'c':'C','p':'P'},150:{'c':'X','p':'Y'},200:{'c':'Z','p':'W'}}):
             self.api.index_ohlc.return_value={DAY:100}
