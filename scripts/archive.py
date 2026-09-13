@@ -3,10 +3,10 @@
 """
 만기가 지난 월물을 봉인해 백업으로 남긴다. 매일 수집 뒤에 자동으로 한 번 돈다.
 
-만기 지난 월물은 KIS에서 더 이상 조회되지 않는다. 그래서 이 폴더가 유일한 기록이 된다.
-봉인본은 두 벌로 남긴다.
+만기 후 API 재조회 가능 여부에 의존하지 않도록 시세 사본을 보관한다.
+개인 마킹·메모는 이 공개 보관본에 포함하지 않는다.
 
-  archive/{YYMM}.json   시세 + 그때의 마킹·메모까지 합친 확정본 (앱에서 다시 열 수 있음)
+  archive/{YYMM}.json   공개 시세 보관본 (앱에서 다시 열 수 있음)
   archive/{YYMM}.xlsx   행사가마다 시트 1개인 엑셀 (앱 없이 그냥 열어 보는 용도)
   archive/INDEX.md      무엇이 언제 봉인됐는지 목록
 
@@ -16,7 +16,10 @@ import argparse
 import datetime
 import json
 import os
+from pathlib import Path
 import shutil
+from expiry_notice import expiry_of
+from public_data import public_doc, assert_public, atomic_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
@@ -33,17 +36,6 @@ def fmt_strike(s):
 def this_month():
     n = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     return "%s%02d" % (str(n.year)[2:], n.month)
-
-
-def load_marks():
-    p = os.path.join(DATA, "marks.json")
-    if not os.path.exists(p):
-        return {}, {}
-    try:
-        o = json.load(open(p, encoding="utf-8"))
-        return o.get("marks", {}), o.get("memos", {})
-    except Exception:
-        return {}, {}
 
 
 def write_xlsx(doc, marks, memos, path):
@@ -115,8 +107,8 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(ARCH, exist_ok=True)
-    marks, memos = load_marks()
-    cutoff = this_month()
+    # Public archives never open marks.json, even when run on the owner's PC.
+    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date()
     sealed = []
 
     names = sorted(f[:-5] for f in os.listdir(DATA)
@@ -124,30 +116,39 @@ def main():
     for ex in names:
         if args.expiry and ex != args.expiry:
             continue
-        if ex >= cutoff:                      # 아직 살아 있는 월물은 건드리지 않는다
+        expiry = expiry_of(2000 + int(ex[:2]), int(ex[2:]))
+        if expiry >= today:
             continue
         out_json = os.path.join(ARCH, ex + ".json")
+        out_xlsx = os.path.join(ARCH, ex + ".xlsx")
         if os.path.exists(out_json) and not args.force:
+            if not os.path.exists(out_xlsx):
+                previous = json.loads(Path(out_json).read_text(encoding="utf-8"))
+                assert_public(previous, out_json)
+                write_xlsx(public_doc(previous), {}, {}, out_xlsx)
             continue
 
-        doc = json.load(open(os.path.join(DATA, ex + ".json"), encoding="utf-8"))
-        pre = ex + "|"
+        doc = json.loads((Path(DATA) / (ex + ".json")).read_text(encoding="utf-8"))
+        assert_public(doc, ex)
+        if doc.get("collection") and any(v.get("status") != "complete" for v in doc["collection"].values()):
+            print("  %s 수집 미완료 — 봉인하지 않습니다" % ex)
+            continue
+        if not doc.get("dates") or max(doc["dates"]) < expiry.isoformat():
+            print("  %s 최종거래일 기록이 없습니다 — 봉인하지 않습니다" % ex)
+            continue
+        doc = public_doc(doc)
         doc["sealed"] = datetime.datetime.now(
             datetime.timezone(datetime.timedelta(hours=9))).isoformat(timespec="seconds")
-        doc["marks"] = {k: v for k, v in marks.items() if k.startswith(pre)}
-        doc["memos"] = {k: v for k, v in memos.items() if k.startswith(pre)}
-        # 메모는 행에도 심어 둔다 — 봉인본만 따로 열어도 보이도록
-        for r in doc["rows"]:
-            k = pre + fmt_strike(r["strike"]) + "|" + r["date"]
-            if k in doc["memos"]:
-                r["memo1"], r["memo2"] = doc["memos"][k][0], doc["memos"][k][1]
-
-        json.dump(doc, open(out_json, "w", encoding="utf-8"),
-                  ensure_ascii=False, separators=(",", ":"))
-        ok = write_xlsx(doc, marks, memos, os.path.join(ARCH, ex + ".xlsx"))
+        if args.force and os.path.exists(out_json):
+            backup = os.path.join(ROOT, ".private", "archive-backups", doc["sealed"].replace(":", "-"))
+            os.makedirs(backup, exist_ok=True)
+            shutil.copy2(out_json, backup)
+            if os.path.exists(out_xlsx):
+                shutil.copy2(out_xlsx, backup)
+        atomic_json(out_json, doc)
+        ok = write_xlsx(doc, {}, {}, out_xlsx)
         sealed.append((ex, doc, ok))
-        print("  봉인 %s — 거래일 %d일, 행사가 %d개, 마킹 %d건"
-              % (ex, len(doc["dates"]), len(doc["strikes"]), len(doc["marks"])))
+        print("  공개 시세 봉인 %s — 거래일 %d일, 행사가 %d개" % (ex, len(doc["dates"]), len(doc["strikes"])))
 
     write_index()
     if not sealed:
@@ -160,18 +161,19 @@ def write_index():
     for f in sorted(os.listdir(ARCH)):
         if not f.endswith(".json"):
             continue
-        d = json.load(open(os.path.join(ARCH, f), encoding="utf-8"))
+        d = json.loads((Path(ARCH) / f).read_text(encoding="utf-8"))
+        assert_public(d, f)
         rows.append("| %s | %s | %d일 | %s ~ %s | %s | %s |" % (
             d["expiry"], d.get("label", ""), len(d.get("dates", [])),
             (d.get("dates") or [""])[0], (d.get("dates") or [""])[-1],
             "%d건" % len(d.get("marks", {})),
             (d.get("sealed") or "")[:10]))
     body = ["# 봉인된 월물", "",
-            "만기가 지난 월물은 증권사 API로 다시 받을 수 없습니다. 이 폴더가 유일한 기록입니다.",
+            "공개 시세 보관본입니다. 개인 마킹·메모는 Firebase 개인 저장소와 개인 백업 파일에 보관합니다.",
             "`.json` 은 앱의 **데이터 불러오기** 로 열 수 있고, `.xlsx` 는 그냥 엑셀로 열면 됩니다.", "",
             "| 월물 | 이름 | 거래일 | 기간 | 마킹 | 봉인일 |",
             "|---|---|---|---|---|---|"] + rows + [""]
-    open(os.path.join(ARCH, "INDEX.md"), "w", encoding="utf-8").write("\n".join(body))
+    (Path(ARCH) / "INDEX.md").write_text("\n".join(body), encoding="utf-8")
 
 
 if __name__ == "__main__":

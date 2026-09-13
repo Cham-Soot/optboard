@@ -6,7 +6,15 @@
 *.tmp
 __pycache__/
 
-# 마킹·메모를 공개 저장소에 올리고 싶지 않다면 아래 주석을 푸세요
+# 개인 마킹·메모는 공개 저장소에 올리지 않는다
 data/marks.json
 # 마킹·메모가 심긴 개인용 화면 — 절대 올리지 않는다
 내화면.html
+.private/
+_site/
+node_modules/
+test-results/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+*.local.json

@@ -18,6 +18,7 @@ import calendar
 import datetime as dt
 import json
 import os
+from pathlib import Path
 import sys
 
 KST = dt.timezone(dt.timedelta(hours=9))
@@ -33,7 +34,7 @@ def closed_days():
     global _cal
     if _cal is None:
         try:
-            _cal = set(json.load(open(CAL, encoding="utf-8")).get("closed", []))
+            _cal = set(json.loads(Path(CAL).read_text(encoding="utf-8")).get("closed", []))
         except Exception:
             _cal = set()
     return _cal
@@ -42,8 +43,8 @@ def closed_days():
 def calendar_covers(d):
     """그 날짜까지 달력이 실제로 확인해 준 구간인가."""
     try:
-        c = json.load(open(CAL, encoding="utf-8"))
-        return bool(c.get("to")) and dt.date.fromisoformat(c["to"]) >= d
+        c = json.loads(Path(CAL).read_text(encoding="utf-8"))
+        return bool(c.get("from") and c.get("to")) and c["from"] <= d.isoformat() <= c["to"]
     except Exception:
         return False
 
@@ -119,10 +120,9 @@ def main():
 
 1. 앱을 열고 이 월물이 마지막 거래일까지 들어왔는지 확인
 2. 상단 **마킹 보관** → **marks.json 내려받기**
-3. 내려받은 파일을 `data/marks.json` 에 덮어쓰고 커밋
+3. 내려받은 파일은 개인 백업 폴더에 보관 (GitHub에 올리지 않음)
 
-이렇게 해 두면 다음 달 첫 자동 실행 때 `archive/` 에 시세·마킹·메모가 통째로 봉인됩니다.
-마킹을 커밋하지 않으면 그 브라우저에만 남습니다.
+`archive/`에는 공개 시세만 보관됩니다. 개인 마킹·메모는 본인 계정 동기화와 별도 백업으로 보존하세요.
 
 > 날짜 근거: {src}{shift}
 """.format(ym=ym, exp=exp, when=when, src=src,
