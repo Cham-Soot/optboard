@@ -1,95 +1,76 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-매일 장 마감 후 한 번 실행 — 거래 중인 월물의 행사가별 콜/풋 시세를 하루치 추가한다.
-
-  python3 scripts/collect.py                 # 근월물 + 차월물
-  python3 scripts/collect.py --all           # 거래 중인 월물 전부
-  python3 scripts/collect.py --expiry 202609 # 특정 월물만
-
-설정(config.json 또는 환경변수):
-  STRIKE_MIN / STRIKE_MAX   수집할 행사가 범위 (비우면 전부)
-  MONTHS                    near(근월물만) | near2(근월+차월, 기본) | all
-"""
+"""Verified daily prices. Exit: 0 complete/closed, 2 config, 3 retryable, 4 incomplete."""
 import argparse
+import datetime as dt
 import json
+import math
 import os
+from pathlib import Path
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kis import Kis, KisError, kst_now, implied_index  # noqa: E402
+from kis import Kis, KisError, kst_now
+from public_data import assert_public, atomic_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
+COMPLETE = {"ok", "no_trade"}
+
+
+class CollectionIncomplete(KisError):
+    pass
 
 
 def load_config():
     cfg = {"STRIKE_MIN": None, "STRIKE_MAX": None, "MONTHS": "near2",
-           "RANGE_MODE": "atm", "ATM_SPAN": 40,
-           "PRODUCT": "KOSPI200 옵션"}
-    p = os.path.join(ROOT, "config.json")
-    if os.path.exists(p):
-        cfg.update(json.load(open(p, encoding="utf-8")))
-    for k in ("STRIKE_MIN", "STRIKE_MAX", "MONTHS", "RANGE_MODE", "ATM_SPAN"):
-        if os.environ.get(k):
-            cfg[k] = os.environ[k]
-    for k in ("STRIKE_MIN", "STRIKE_MAX"):
-        cfg[k] = None if cfg[k] in (None, "", "null") else float(cfg[k])
-    cfg["ATM_SPAN"] = int(cfg["ATM_SPAN"] or 40)
-    cfg["RANGE_MODE"] = str(cfg["RANGE_MODE"] or "atm").lower()
+           "RANGE_MODE": "atm", "ATM_SPAN": 40, "PRODUCT": "KOSPI200 옵션"}
+    path = Path(ROOT) / "config.json"
+    if path.exists():
+        cfg.update(json.loads(path.read_text(encoding="utf-8")))
+    for key in ("STRIKE_MIN", "STRIKE_MAX", "MONTHS", "RANGE_MODE", "ATM_SPAN"):
+        if os.environ.get(key):
+            cfg[key] = os.environ[key]
+    for key in ("STRIKE_MIN", "STRIKE_MAX"):
+        cfg[key] = None if cfg[key] in (None, "", "null") else float(cfg[key])
+    cfg["ATM_SPAN"] = int(cfg["ATM_SPAN"])
+    if not 1 <= cfg["ATM_SPAN"] <= 600 or cfg["RANGE_MODE"] not in ("atm", "fixed", "all"):
+        raise ValueError("행사가 범위 설정을 확인하세요")
+    if cfg["MONTHS"] not in ("near", "near2", "all"):
+        raise ValueError("MONTHS는 near, near2, all 중 하나여야 합니다")
     return cfg
 
 
 def load_codes(yyyymm):
-    """
-    data/optcodes.json 에서 그 월물의 {행사가: {'c':코드,'p':코드}} 를 꺼낸다.
-    (scripts/master.py 가 만들어 둔 거래소 종목마스터 캐시)
-    """
-    p = os.path.join(DATA, "optcodes.json")
-    if not os.path.exists(p):
+    path = Path(DATA) / "optcodes.json"
+    if not path.exists():
         return {}
-    try:
-        doc = json.load(open(p, encoding="utf-8"))
-    except Exception:
-        return {}
-    return {float(k): v for k, v in (doc.get("months", {}).get(yyyymm) or {}).items()}
+    obj = json.loads(path.read_text(encoding="utf-8"))
+    return {float(k): v for k, v in obj.get("months", {}).get(yyyymm, {}).items()}
 
 
 def pick_strikes(all_strikes, center, cfg):
-    """
-    수집할 행사가를 고른다.
-
-      RANGE_MODE = "atm"   지수를 따라 움직인다 — 등가 위아래로 ATM_SPAN 개씩 (권장)
-                   "fixed" STRIKE_MIN ~ STRIKE_MAX 고정
-                   "all"   가능한 것 전부
-    """
-    ks = sorted(all_strikes)
-    mode = cfg["RANGE_MODE"]
-    if mode == "fixed":
+    ks = sorted(set(all_strikes))
+    if cfg["RANGE_MODE"] == "fixed":
         lo, hi = cfg["STRIKE_MIN"], cfg["STRIKE_MAX"]
-        return [s for s in ks
-                if (lo is None or s >= lo) and (hi is None or s <= hi)]
-    if mode != "atm" or center is None:
+        return [s for s in ks if (lo is None or s >= lo) and (hi is None or s <= hi)]
+    if cfg["RANGE_MODE"] == "all":
         return ks
+    if center is None or not math.isfinite(center) or center <= 0:
+        raise ValueError("해당 거래일의 KOSPI200 지수가 없어 ATM 범위를 정할 수 없습니다")
     n = cfg["ATM_SPAN"]
     return [s for s in ks if s <= center][-n:] + [s for s in ks if s > center][:n]
 
 
-def check_expiry(v):
-    """월물은 YYYYMM 6자리. 날짜(2026-08-28)를 잘못 넣는 실수를 곧바로 잡는다."""
-    v = (v or "").strip()
-    if len(v) == 6 and v.isdigit() and "01" <= v[4:6] <= "12":
-        return v
-    raise SystemExit(
-        "월물 형식이 잘못됐습니다: %r\n"
-        "  월물은 YYYYMM 6자리입니다 — 예: 202609\n"
-        "  날짜를 넣으려던 것이라면 --date 2026-08-28 또는 Run workflow 의 "
-        "'기록할 날짜' 칸을 쓰세요." % v)
+def check_expiry(value):
+    value = (value or "").strip()
+    if len(value) == 6 and value.isdigit() and 2000 <= int(value[:4]) <= 2099 and "01" <= value[4:] <= "12":
+        return value
+    raise ValueError("월물은 YYYYMM 6자리입니다. 예: 202609 (날짜는 --date 2026-08-28)")
 
 
 def expiry_key(yyyymm):
-    """202609 -> '2609'"""
     return yyyymm[2:6]
 
 
@@ -98,35 +79,33 @@ def doc_path(yyyymm):
 
 
 def load_doc(yyyymm, product):
-    p = doc_path(yyyymm)
-    if os.path.exists(p):
-        return json.load(open(p, encoding="utf-8"))
-    return {"expiry": expiry_key(yyyymm),
-            "label": "%s년 %s월물" % (yyyymm[2:4], int(yyyymm[4:6])),
-            "product": product, "strikes": [], "dates": [],
-            "updated": None, "rows": []}
+    path = Path(doc_path(yyyymm))
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {"expiry": expiry_key(yyyymm), "label": "%s년 %s월물" % (yyyymm[2:4], int(yyyymm[4:])),
+            "product": product, "strikes": [], "dates": [], "updated": None, "rows": []}
 
 
 def save_doc(doc):
-    doc["strikes"] = sorted({float(s) for s in doc["strikes"]})
+    doc["strikes"] = sorted(set(float(s) for s in doc["strikes"]))
     doc["dates"] = sorted(set(doc["dates"]))
     doc["updated"] = kst_now().isoformat(timespec="seconds")
     doc["rows"].sort(key=lambda r: (r["date"], float(r["strike"])))
-    os.makedirs(DATA, exist_ok=True)
-    tmp = doc_path("20" + doc["expiry"]) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, doc_path("20" + doc["expiry"]))
+    assert_public(doc, doc["expiry"])
+    atomic_json(doc_path("20" + doc["expiry"]), doc)
 
 
 def upsert(doc, date, strike, c, p):
-    """같은 (날짜, 행사가)가 이미 있으면 덮어쓴다 — 하루에 여러 번 돌려도 안전."""
-    for r in doc["rows"]:
-        if r["date"] == date and float(r["strike"]) == strike:
-            r["c"], r["p"] = c, p
+    """Missing/failed responses never replace a previously successful side."""
+    for row in doc["rows"]:
+        if row["date"] == date and float(row["strike"]) == strike:
+            for side, values in (("c", c), ("p", p)):
+                if values is not None and any(v is not None for v in values):
+                    row[side] = list(values)
             return False
-    doc["rows"].append({"date": date, "strike": strike, "c": c, "p": p,
-                        "memo1": "", "memo2": ""})
+    doc["rows"].append({"date": date, "strike": strike,
+                        "c": list(c) if c is not None else [None] * 4,
+                        "p": list(p) if p is not None else [None] * 4})
     if strike not in doc["strikes"]:
         doc["strikes"].append(strike)
     if date not in doc["dates"]:
@@ -134,165 +113,223 @@ def upsert(doc, date, strike, c, p):
     return True
 
 
-def collect_one(api, yyyymm, cfg, date, use_board=True):
-    doc = load_doc(yyyymm, cfg["PRODUCT"])
-    board, meta = api.callput_board(yyyymm)
-    if not board:
-        print("  [%s] 시세판이 비어 있습니다 (휴장이거나 월물이 아직 없음)" % yyyymm)
-        return 0
-
-    # 전광판은 100건 상한이라 등가 근처가 빠져 있을 수 있다.
-    # 지수는 풋-콜 패리티로 정확히 역산되므로 그걸 기준으로 삼는다.
-    center = implied_index(board) or meta.get("atm")
-    codes = load_codes(yyyymm)
-    ks_board = sorted(board)
-
-    if codes:
-        picked = pick_strikes(codes.keys(), center, cfg)
-        src = "종목마스터"
-    else:
-        picked = pick_strikes(ks_board, center, cfg)
-        src = "전광판만"
-        if max(meta["n_call"], meta["n_put"]) >= 100:
-            print("  [%s] ⚠ 전광판이 100건 상한(%g ~ %g)까지만 보냈고 종목마스터가 없습니다."
-                  % (yyyymm, ks_board[0], ks_board[-1]))
-            print("        python3 scripts/master.py 를 먼저 돌리면 등가 근처까지 받아옵니다.")
-
-    if not picked:
-        print("  [%s] 고를 행사가가 없습니다." % yyyymm)
-        return 0
-    need = [s for s in picked if s not in board]
-    print("  [%s]%s 지수 %s · 행사가 %g ~ %g %d개 (%s, 개별조회 %d개)"
-          % (yyyymm, "" if use_board else " (놓친 날 %s 메우기)" % date,
-             center, picked[0], picked[-1], len(picked), src,
-             len(need) if use_board else len(picked)))
-
-    added = touched = 0
-    for i, strike in enumerate(picked, 1):
-        side = board.get(strike) if use_board else None
-        if side is not None:                       # 전광판이 준 건 그대로 쓴다 (공짜)
-            c, p = side.get("c", {}), side.get("p", {})
-            cv = [c.get("open"), c.get("high"), c.get("low"), c.get("close")]
-            pv = [p.get("open"), p.get("high"), p.get("low"), p.get("close")]
-        else:                                      # 빠진 건 종목별로 하루치만 받아온다
-            cv, pv = [None] * 4, [None] * 4
-            for key, dest in (("c", "cv"), ("p", "pv")):
-                code = (codes.get(strike) or {}).get(key)
-                if not code:
-                    continue
-                try:
-                    d8 = date.replace("-", "")
-                    rows = api.daily_ohlc(code, d8, d8)
-                except KisError:
-                    rows = []
-                if rows:
-                    r = rows[-1]
-                    v = [r["open"], r["high"], r["low"], r["close"]]
-                    if dest == "cv":
-                        cv = v
-                    else:
-                        pv = v
-                time.sleep(0.15)
-            if i % 20 == 0:
-                print("        %d/%d …" % (i, len(picked)))
-        if all(v is None for v in cv + pv):
-            continue
-        added += upsert(doc, date, strike, cv, pv)
-        touched += 1
-
-    save_doc(doc)
-    print("  [%s] %s — 행사가 %d개 기록 (신규 %d)" % (yyyymm, date, touched, added))
-    return touched
+def calendar_data():
+    obj = json.loads((Path(DATA) / "calendar.json").read_text(encoding="utf-8"))
+    if not obj.get("from") or not obj.get("to"):
+        raise ValueError("거래일 달력을 먼저 갱신해야 합니다")
+    return obj
 
 
-def recent_open_days(days=7):
-    """최근 며칠 중 거래소가 열렸던 날들 (오늘 제외). 달력이 없으면 빈 목록."""
-    try:
-        cal = json.load(open(os.path.join(DATA, "calendar.json"), encoding="utf-8"))
-        closed = set(cal.get("closed", []))
-    except Exception:
-        return []
-    today = kst_now().date()
+def open_day(day, cal):
+    d = dt.date.fromisoformat(day)
+    if not cal["from"] <= day <= cal["to"]:
+        raise ValueError("달력이 확인되지 않은 날짜입니다: " + day)
+    return d.weekday() < 5 and day not in set(cal.get("closed", []))
+
+
+def recent_open_days(days=7, end=None):
+    cal = calendar_data()
+    today = dt.date.fromisoformat(end) if end else kst_now().date()
     out = []
     for i in range(1, days + 1):
-        d = today - __import__("datetime").timedelta(days=i)
-        if d.weekday() < 5 and d.isoformat() not in closed:
-            out.append(d.isoformat())
+        d = (today - dt.timedelta(days=i)).isoformat()
+        if d >= cal["from"] and open_day(d, cal):
+            out.append(d)
     return sorted(out)
 
 
+def quote_values(row):
+    values = [row.get(k) for k in ("open", "high", "low", "close")]
+    if any(v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))
+                              or not math.isfinite(v) or v < 0) for v in values):
+        raise ValueError("잘못된 가격 값")
+    if row.get("volume") == 0:
+        return None, "no_trade"
+    if any(v is None for v in values):
+        raise ValueError("거래 시세의 OHLC 일부 누락")
+    op, high, low, close = values
+    if not low <= min(op, close) <= max(op, close) <= high:
+        raise ValueError("시가·고가·저가·종가 관계 불일치")
+    return values, "ok"
+
+
+def collect_range(api, yyyymm, cfg, dates, repair_only=False):
+    """Query each needed contract once for its entire required date range."""
+    dates = sorted(set(dates))
+    if not dates:
+        return 0
+    codes = load_codes(yyyymm)
+    if not codes:
+        raise CollectionIncomplete("%s 종목마스터가 없습니다. 잘린 전광판으로 대체하지 않습니다." % yyyymm)
+    doc = load_doc(yyyymm, cfg["PRODUCT"])
+    states = doc.setdefault("collection", {})
+    unplanned = [day for day in dates if not states.get(day, {}).get("expected")]
+    indices = api.index_ohlc(min(unplanned), max(unplanned)) if unplanned and cfg["RANGE_MODE"] == "atm" else {}
+    needed, failures, retryable, touched = {}, [], False, 0
+    checked = kst_now().isoformat(timespec="seconds")
+    for day in dates:
+        state = states.setdefault(day, {"contracts": {}})
+        if not state.get("expected"):
+            center = indices.get(day)
+            try:
+                picked = pick_strikes(codes, center, cfg)
+                if not picked:
+                    raise ValueError("수집할 행사가가 없습니다")
+            except ValueError as exc:
+                state.update(status="incomplete", checked=checked, error=str(exc))
+                failures.append(day + ": " + str(exc))
+                continue
+            expected = {"%g|%s" % (strike, side): {"strike": strike, "side": side,
+                         "code": codes[strike].get(side)} for strike in picked for side in ("c", "p")}
+            state.update(expected=expected, center=center, index_source="KIS KOSPI200 daily" if center else "configured range")
+        for identity, contract in state["expected"].items():
+            previous = state.setdefault("contracts", {}).get(identity, {})
+            if repair_only and previous.get("status") in COMPLETE:
+                continue
+            code = contract.get("code")
+            if not code:
+                code = codes.get(float(contract["strike"]), {}).get(contract["side"])
+                if code:
+                    contract["code"] = code
+            if not code:
+                state["contracts"][identity] = {"status": "missing_code", "checked": checked}
+                failures.append(day + ": 종목코드 누락")
+                continue
+            needed.setdefault(code, []).append((day, identity, contract))
+
+    for code, targets in needed.items():
+        start, end = min(t[0] for t in targets), max(t[0] for t in targets)
+        error, rows = None, {}
+        try:
+            series = api.daily_ohlc(code, start.replace("-", ""), end.replace("-", ""))
+            for row in series:
+                day = row.get("date", "")
+                if start <= day <= end:
+                    if day in rows and rows[day] != row:
+                        raise ValueError("같은 거래일에 상충하는 응답")
+                    rows[day] = row
+        except (KisError, ValueError) as exc:
+            error = str(exc)
+            retryable = retryable or getattr(exc, "retryable", False)
+        for day, identity, contract in targets:
+            state = states[day]
+            status, values = "missing", None
+            message = error
+            if not message and day in rows:
+                try:
+                    values, status = quote_values(rows[day])
+                except ValueError as exc:
+                    message, status = str(exc), "invalid"
+            elif message:
+                status = "error"
+            else:
+                message = "요청 거래일의 응답이 없습니다"
+            item = {"status": status, "checked": checked}
+            if message:
+                item["error"] = message[:200]
+                failures.append("%s %s: %s" % (day, identity, message))
+            state["contracts"][identity] = item
+            if status in COMPLETE:
+                upsert(doc, day, contract["strike"], values if contract["side"] == "c" else None,
+                       values if contract["side"] == "p" else None)
+                touched += 1
+        time.sleep(0.15)
+
+    for day in dates:
+        state = states[day]
+        expected = state.get("expected", {})
+        successful = sum(state.get("contracts", {}).get(k, {}).get("status") in COMPLETE for k in expected)
+        state.update(checked=checked, expected_count=len(expected), complete_count=successful,
+                     status="complete" if expected and successful == len(expected) else "incomplete")
+        print("  [%s] %s: %d/%d 종목 확인 (%s)" % (yyyymm, day, successful, len(expected), state["status"]))
+    save_doc(doc)
+    if failures or any(states[d]["status"] != "complete" for d in dates):
+        raise CollectionIncomplete("%s: 미완료 %d건. 성공한 값은 보존했습니다. %s" %
+                                   (yyyymm, len(failures), "; ".join(failures[:3])), retryable=retryable)
+    return touched
+
+
+def collect_one(api, yyyymm, cfg, date, use_board=False):
+    # Compatible argument, but current quotes are never used, even with True.
+    return collect_range(api, yyyymm, cfg, [date])
+
+
 def heal_missing(api, targets, cfg, today):
-    """
-    GitHub 예약 실행이 지연·누락되어 빠진 날을 스스로 채운다.
-    최근 7일의 개장일 중 기록이 없는 날을 종목별 일별 조회로 되메운다.
-    """
+    errors = []
     for ym in targets:
         doc = load_doc(ym, cfg["PRODUCT"])
-        if not doc["dates"]:
-            continue                        # 아직 한 번도 수집한 적 없는 월물은 건드리지 않는다
+        if not doc.get("dates"):
+            continue
         first = min(doc["dates"])
-        missing = [d for d in recent_open_days(7)
-                   if d not in doc["dates"] and d > first and d != today]
-        for d in missing:
-            print("  [%s] %s 기록이 비어 있습니다 — 메웁니다 (예약 실행이 빠졌던 날)" % (ym, d))
-            try:
-                collect_one(api, ym, cfg, d, use_board=False)
-            except KisError as e:
-                print("  [%s] %s 메우기 실패: %s" % (ym, d, e))
+        days = [day for day in recent_open_days(7, today) if day >= first
+                and doc.get("collection", {}).get(day, {}).get("status") != "complete"]
+        try:
+            collect_range(api, ym, cfg, days, repair_only=True)
+        except KisError as exc:
+            errors.append(exc)
+    if errors:
+        raise CollectionIncomplete("누락 복구 미완료: " + "; ".join(str(e) for e in errors),
+                                   retryable=any(getattr(e, "retryable", False) for e in errors))
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--expiry", help="특정 월물만 (예: 202609)")
-    ap.add_argument("--all", action="store_true", help="거래 중인 월물 전부")
-    ap.add_argument("--date", help="기록할 날짜 (기본: 오늘, KST)")
-    ap.add_argument("--force", action="store_true",
-                    help="휴장일·주말이어도 강행")
+    ap.add_argument("--expiry", help="월물 YYYYMM")
+    ap.add_argument("--all", action="store_true")
+    ap.add_argument("--date", help="실제 거래일 YYYY-MM-DD")
+    ap.add_argument("--force", action="store_true", help="장 마감 시각 검사만 생략")
     args = ap.parse_args()
-
-    cfg = load_config()
-    now = kst_now()
-    date = args.date or now.strftime("%Y-%m-%d")
-
-    if not args.date and not args.force:
-        if now.weekday() >= 5:
-            print("주말입니다 — 수집을 건너뜁니다.")
+    report = {"checked": kst_now().isoformat(timespec="seconds"), "status": "failed", "errors": []}
+    try:
+        ym_arg = check_expiry(args.expiry) if args.expiry else None
+        cfg, cal, now = load_config(), calendar_data(), kst_now()
+        day = dt.date.fromisoformat(args.date) if args.date else now.date()
+        if day > now.date():
+            raise ValueError("미래 날짜는 수집할 수 없습니다")
+        report["date"] = day.isoformat()
+        if not open_day(day.isoformat(), cal):
+            if args.date:
+                raise ValueError("지정한 날짜는 거래일이 아닙니다")
+            report["status"] = "closed"
             return 0
-        # 휴장일에 돌면 직전 영업일 시세가 오늘 날짜로 박힐 수 있다. 달력이 있으면 막는다.
-        try:
-            cal = json.load(open(os.path.join(DATA, "calendar.json"), encoding="utf-8"))
-            if date in set(cal.get("closed", [])):
-                print("%s 은 휴장일입니다 — 수집을 건너뜁니다." % date)
-                return 0
-        except Exception:
-            pass
-
-    api = Kis()
-    if args.expiry:
-        targets = [check_expiry(args.expiry)]
-    else:
-        ex = api.option_expiries()
-        if not ex:
-            print("월물 목록을 받지 못했습니다.")
-            return 1
-        targets = ex if (args.all or cfg["MONTHS"] == "all") \
-            else ex[:1] if cfg["MONTHS"] == "near" else ex[:2]
-
-    print("수집 대상: %s  (기록일 %s)" % (", ".join(targets), date))
-    total = 0
-    for i, ym in enumerate(targets):
-        if i:
-            time.sleep(1.2)          # 전광판 API는 1초 1회 이내 권장
-        try:
-            total += collect_one(api, ym, cfg, date)
-        except KisError as e:
-            print("  [%s] 실패: %s" % (ym, e))
-    if total == 0:
-        print("기록된 행사가가 없습니다 — 휴장일로 보입니다.")
-
-    if not args.expiry:                      # 평소 실행에서만 — 빠진 날을 스스로 메운다
-        heal_missing(api, targets, cfg, date)
-    return 0
+        if day == now.date() and now.hour < 16 and not args.force:
+            raise ValueError("정규장 종가 수집은 16시 이후 실행하세요")
+        if str(cal.get("updated", ""))[:10] != now.date().isoformat():
+            raise ValueError("오늘의 휴장일 확인이 필요합니다. calendar_sync.py를 먼저 실행하세요")
+        api = Kis()
+        expiries = [ym_arg] if ym_arg else api.option_expiries()
+        targets = expiries if ym_arg or args.all or cfg["MONTHS"] == "all" else expiries[:1 if cfg["MONTHS"] == "near" else 2]
+        if not targets:
+            raise KisError("월물 목록이 없습니다", retryable=True)
+        errors = []
+        for ym in targets:
+            try:
+                collect_one(api, ym, cfg, day.isoformat())
+            except KisError as exc:
+                errors.append(exc)
+        if not args.date and not ym_arg:
+            try:
+                heal_missing(api, targets, cfg, day.isoformat())
+            except KisError as exc:
+                errors.append(exc)
+        report["targets"] = targets
+        if errors:
+            report["errors"] = [str(e)[:600] for e in errors]
+            report["status"] = "incomplete"
+            return 3 if any(getattr(e, "retryable", False) for e in errors) else 4
+        report["status"] = "complete"
+        return 0
+    except (ValueError, FileNotFoundError) as exc:
+        report["errors"] = [str(exc)]
+        return 2
+    except KisError as exc:
+        report["errors"] = [str(exc)[:600]]
+        return 3 if getattr(exc, "retryable", False) else 4
+    finally:
+        atomic_json(Path(DATA) / "collection_status.json", report)
+        print("수집 상태: " + report["status"])
+        for message in report["errors"]:
+            print(message)
 
 
 if __name__ == "__main__":

@@ -243,14 +243,17 @@ td.cell.m-box-lo .v,td.cell.m-ul-lo .v{color:var(--lo);font-weight:600}
     <div class="spacer"></div>
     <button class="btn" id="btnHelp">마킹 규칙</button>
     <button class="btn" id="btnLoad">데이터 불러오기</button>
-    <button class="btn" id="btnBackup">마킹 보관</button>
+    <button class="btn" id="btnLogin">개인 메모 로그인</button>
+    <button class="btn" id="btnConflicts" hidden>수정 충돌</button>
+    <button class="btn" id="btnBackup">메모 백업</button>
     <button class="btn primary" id="btnXlsx">엑셀 내보내기</button>
     <button class="btn" id="btnTheme" title="화면 밝기 전환">◐</button>
   </header>
+  <div class="sync-info"><span id="syncStatus" role="status" aria-live="polite">메모는 이 기기에 저장됩니다</span><span id="collectionHealth" role="status"></span></div>
 
   <div class="banner" id="banner">
     <span id="bannerText"></span>
-    <span class="note">만기가 지난 월물은 증권사에서 다시 받을 수 없습니다. 마킹을 저장소에 보관해 두세요.</span>
+    <span class="note">최종거래일까지 시세가 있는지 확인하고, 개인 메모 백업도 보관하세요.</span>
     <button class="btn" id="bannerAct">마킹 보관하기</button>
   </div>
 
@@ -300,6 +303,14 @@ td.cell.m-box-lo .v,td.cell.m-ul-lo .v{color:var(--lo);font-weight:600}
 <div class="sheet" id="sheet"><div class="card" id="card"></div></div>
 <div class="toast" id="toast"></div>
 <input type="file" id="filePick" accept="application/json,.json" hidden>
+<input type="file" id="memoFilePick" accept="application/json,.json" hidden>
+<style>
+.sync-info{display:flex;flex-wrap:wrap;gap:10px 24px;padding:8px 24px;font-size:12px;color:var(--muted)}
+.sync-info [data-state="error"]{color:var(--hi)}
+.history-item{padding:14px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+#btnConflicts[hidden]{display:none}
+header{flex-wrap:wrap}
+</style>
 
 <script>
 /* ======================================================================
@@ -348,7 +359,10 @@ const OPPOSITE  = {cH:'pH',pH:'cH',cL:'pL',pL:'cL'};   // 반대쪽 같은이름
 
 /* ---------- 저장소 ---------- */
 function safeGet(k,fb){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):fb; }catch(e){ return fb; } }
-function safeSet(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} }
+function safeSet(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); return true; }catch(e){
+  $('#syncStatus').textContent='기기 저장 실패 · 메모 백업 파일을 저장해 주세요';
+  $('#syncStatus').dataset.state='error'; toast('저장하지 못했습니다. 창을 닫기 전에 메모를 백업하세요'); return false;
+} }
 marks = safeGet(MARK_KEY,{});
 memos = safeGet(MEMO_KEY,{});
 
@@ -389,8 +403,8 @@ function expiryLabel(e){
 }
 /** 만기가 지난 월물인가 — 오늘이 속한 달보다 앞이면 종료된 월물 */
 function isPast(e){
-  const now=new Date();
-  return e < (String(now.getFullYear()).slice(2) + String(now.getMonth()+1).padStart(2,'0'));
+  const now=new Date(); now.setHours(0,0,0,0);
+  return expiryDate(e) < now;
 }
 /** KOSPI200 지수옵션 최종거래일.
     빌드할 때 거래소 달력(KIS 국내휴장일조회)으로 계산해 심어 둔 값을 쓴다.
@@ -623,9 +637,13 @@ function memoTd(k,i,seed){
   const td=document.createElement('td'); td.className='memo sep';
   const inp=document.createElement('input');
   inp.className='memo'; inp.type='text'; inp.placeholder=i===0?'메모 1':'메모 2';
+  inp.maxLength=4000; inp.dataset.k=k; inp.dataset.i=i;
   const cell = memoOf(k);
   inp.value = cell ? (cell[i]||'') : (seed||'');
   inp.oninput = ()=>{
+    if(window.optboardSync?.isActive()){
+      window.optboardSync.edit(k,{['memo'+(i+1)]:inp.value}); return;
+    }
     const arr = (memoOf(k) || [seedOf(k,0), seedOf(k,1)]).slice();
     arr[i] = inp.value;
     memos[k] = arr;                 // 빈 값이어도 남긴다 — "지웠다"는 기록
@@ -670,7 +688,10 @@ function onCellClick(td){
     CELLS.forEach(c=>delete cell[c]);
   }
 
-  marks[k]=cell;                    // 비어 있어도 남긴다 — 보관본 위에 "지웠다"를 덮기 위해
+  if(window.optboardSync?.isActive()){
+    window.optboardSync.edit(k,{marks:cell}); return;
+  }
+  marks[k]=cell;
   safeSet(MARK_KEY,marks);
 
   const tr=td.parentElement;
@@ -727,12 +748,9 @@ $('#filePick').onchange=e=>{
   rd.readAsText(f); e.target.value='';
 };
 
-/** 보관본 + 이 브라우저의 수정본을 합쳐 하나로 — 저장소에 넣을 최종본 */
+/** 개인 백업. 빈 값도 삭제 기록으로 남긴다. */
 function mergedMarks(){
-  const m=Object.assign({},baseMarks), n=Object.assign({},baseMemos);
-  for(const k in marks){ if(Object.keys(marks[k]).length) m[k]=marks[k]; else delete m[k]; }
-  for(const k in memos){ if(memos[k][0]||memos[k][1]) n[k]=memos[k]; else delete n[k]; }
-  return {marks:m, memos:n};
+  return {formatVersion:2,marks:Object.assign({},baseMarks,marks),memos:Object.assign({},baseMemos,memos)};
 }
 $('#btnBackup').onclick=()=>{
   const merged=mergedMarks();
@@ -740,9 +758,8 @@ $('#btnBackup').onclick=()=>{
   openCard(`
   <h2>마킹·메모 보관</h2>
   <p>시세는 저장소에 영구 보관되지만 <b>마킹과 메모는 이 브라우저에만</b> 있습니다.
-     지난 월물까지 어디서든 그대로 보려면 아래 파일을 <code>data/marks.json</code> 으로 저장소에 올려 두세요.
-     한 번 올려 두면 다른 PC·휴대폰에서도 자동으로 얹혀 보입니다. (현재 ${cnt}건)</p>
-  <h3>저장소에 보관하기 (권장)</h3>
+     아래 파일을 개인 백업 폴더에 저장해 주세요. GitHub에 올리지 마세요. (현재 ${cnt}건)</p>
+  <h3>개인 백업 파일 저장</h3>
   <div class="row" style="justify-content:flex-start;margin:0 0 4px">
     <button class="btn primary" onclick="downloadMarks()">marks.json 내려받기</button>
   </div>
@@ -755,18 +772,20 @@ $('#btnBackup').onclick=()=>{
   </div>`);
 };
 function downloadMarks(){
+  if(window.optboardSync){window.optboardSync.downloadBackup();return;}
   const blob=new Blob([JSON.stringify(mergedMarks())],{type:'application/json'});
   try{
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a'); a.href=url; a.download='marks.json';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url),4000);
-    toast('marks.json — 저장소의 data/ 폴더에 넣어 주세요');
+    toast('개인 백업 폴더에 보관하세요. GitHub에 올리지 마세요');
   }catch(e){ toast('이 화면에서는 저장이 막혀 있습니다 — 아래 내용을 복사해 쓰세요'); }
 }
 function restoreBackup(){
   try{
     const o=JSON.parse(document.getElementById('bak').value);
+    if(window.optboardSync){window.optboardSync.importBackup(o);return;}
     marks=o.marks||{}; memos=o.memos||{};
     safeSet(MARK_KEY,marks); safeSet(MEMO_KEY,memos);
     closeCard(); renderRail(); renderGrid(); toast('복원했습니다');
@@ -903,12 +922,37 @@ $('#btnXlsx').onclick=exportXlsx;
 /* ======================================================================
    시작
    ====================================================================== */
+let resolveMemoReady;
+const memoReady=new Promise(resolve=>{resolveMemoReady=resolve;});
+function capturePrivate(){
+  return {marks:Object.assign({},MYDATA?.marks||{},baseMarks,marks),memos:Object.assign({},MYDATA?.memos||{},baseMemos,memos)};
+}
+window.optboardMemo={
+  ready:memoReady, captureLegacy:capturePrivate, toast,openCard,closeCard,
+  showRecords(records,editable){
+    const focused=document.activeElement;
+    const caret=focused?.matches('input.memo') ? {k:focused.dataset.k,i:focused.dataset.i,start:focused.selectionStart,end:focused.selectionEnd}:null;
+    baseMarks={};baseMemos={};marks={};memos={};
+    for(const [k,r] of Object.entries(records)){marks[k]=r.marks;memos[k]=[r.memo1,r.memo2];}
+    isMine=editable;document.body.classList.toggle('guest',!editable);
+    if(cur){renderRail();renderGrid();
+      document.querySelectorAll('.strike').forEach(n=>n.classList.toggle('on',Number(n.dataset.s)===curStrike));
+      if(caret){const input=Array.from(document.querySelectorAll('input.memo')).find(n=>n.dataset.k===caret.k&&n.dataset.i===caret.i);
+        if(input){input.focus({preventScroll:true});input.setSelectionRange(caret.start,caret.end);}}
+    }
+  },
+  importLocal(o){
+    marks=Object.assign({},baseMarks,marks,o.marks||{});memos=Object.assign({},baseMemos,memos,o.memos||{});
+    safeSet(MARK_KEY,marks);safeSet(MEMO_KEY,memos);baseMarks={};baseMemos={};
+    isMine=true;safeSet(MINE_KEY,1);document.body.classList.remove('guest');if(cur){renderRail();renderGrid();}
+  }
+};
 (async function boot(){
   document.body.classList.toggle('guest', !isMine);
   ingest(EMBEDDED);
   CATALOG.forEach(c=>{ CAT[c.expiry]=c; });     // 내장되지 않은 지난 월물도 목록에는 뜬다
 
-  // 웹에 올려 둔 경우: 목록과 보관된 마킹을 읽어 온다 (로컬 파일로 열면 조용히 건너뜀)
+  // 공개 시세 목록만 읽는다. 개인 메모는 인증된 Firebase 연결에서만 읽는다.
   try{
     const res=await fetch('data/index.json',{cache:'no-store'});
     if(res.ok){
@@ -920,19 +964,21 @@ $('#btnXlsx').onclick=exportXlsx;
   }catch(e){}
   if(MYDATA){                                   // 파일로 열어도 동작하도록 심어 둔 것을 쓴다
     baseMarks = MYDATA.marks || {}; baseMemos = MYDATA.memos || {};
-  }else if(isMine){
-    try{
-      const res=await fetch('data/marks.json',{cache:'no-store'});
-      if(res.ok){ const o=await res.json(); baseMarks=o.marks||{}; baseMemos=o.memos||{}; }
-    }catch(e){}
   }
+  resolveMemoReady();
 
   if(!Object.keys(DB).length && !Object.keys(CAT).length){
     document.querySelector('.board').innerHTML='<div style="padding:40px;color:var(--muted)">데이터가 없습니다. 상단 <b>데이터 불러오기</b>로 월물 파일을 열어 주세요.</div>';
     return;
   }
   buildExpirySelect();
+  try{
+    const response=await fetch('data/collection_status.json',{cache:'no-store'});
+    if(response.ok){const health=await response.json();const names={complete:'수집 확인 완료',incomplete:'일부 미완료',failed:'수집 실패',closed:'휴장일'};
+      $('#collectionHealth').textContent='시세 '+(health.date||'')+' · '+(names[health.status]||'확인 필요');}
+  }catch(e){}
 })();
 </script>
+<script type="module" src="assets/memo-sync.mjs"></script>
 </body>
 </html>

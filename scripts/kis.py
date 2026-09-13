@@ -17,6 +17,8 @@ import datetime as dt
 import urllib.parse
 import urllib.request
 import urllib.error
+import hashlib
+import math
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, ".token_cache.json")
@@ -60,7 +62,9 @@ _load_dotenv()
 
 
 class KisError(RuntimeError):
-    pass
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class Kis:
@@ -75,10 +79,12 @@ class Kis:
             )
         self.host = HOSTS[self.env]
         self._token = None
+        self._token_exp = 0
+        self._index_cache = {}
 
     # ---------- 접근토큰 ----------
     def token(self):
-        if self._token:
+        if self._token and self._token_exp > time.time() + 60:
             return self._token
         cached = self._read_cache()
         if cached:
@@ -101,27 +107,31 @@ class Kis:
                     res = json.loads(r.read().decode())
                 break
             except urllib.error.HTTPError as e:
-                raise KisError("접근토큰 발급 실패: %s %s" % (e.code, e.read().decode()[:300]))
+                raise KisError("접근토큰 발급 실패: HTTP %s" % e.code,
+                               retryable=e.code in (408, 429) or e.code >= 500)
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 last = e
                 if i < 2:
                     print("  접근토큰 발급이 지연됩니다 — 다시 시도합니다 (%d/3)" % (i + 2))
                     time.sleep(3 * (i + 1))
         if res is None:
-            raise KisError("접근토큰 발급 실패 (네트워크): %s" % last)
+            raise KisError("접근토큰 발급 실패 (네트워크): %s" % last, retryable=True)
 
         tok = res.get("access_token")
         if not tok:
-            raise KisError("접근토큰 응답에 access_token 이 없습니다: %s" % res)
+            raise KisError("접근토큰 응답에 access_token 이 없습니다")
         # 발급 후 24시간 유효 — 여유를 두고 23시간만 사용
-        self._write_cache(tok, time.time() + 23 * 3600)
+        self._token_exp = time.time() + min(int(res.get("expires_in", 86400)), 23 * 3600)
+        self._write_cache(tok, self._token_exp)
         self._token = tok
         return tok
 
     def _read_cache(self):
         try:
             d = json.load(open(CACHE, encoding="utf-8"))
-            if d.get("env") == self.env and d.get("exp", 0) > time.time() + 60:
+            if (d.get("env") == self.env and d.get("key_id") == self._key_id()
+                    and d.get("exp", 0) > time.time() + 60):
+                self._token_exp = d["exp"]
                 return d["token"]
         except Exception:
             pass
@@ -129,11 +139,14 @@ class Kis:
 
     def _write_cache(self, token, exp):
         try:
-            json.dump({"token": token, "exp": exp, "env": self.env},
-                      open(CACHE, "w", encoding="utf-8"))
+            from public_data import atomic_json
+            atomic_json(CACHE, {"token": token, "exp": exp, "env": self.env, "key_id": self._key_id()})
             os.chmod(CACHE, 0o600)
         except Exception:
             pass
+
+    def _key_id(self):
+        return hashlib.sha256(self.appkey.encode()).hexdigest()[:16]
 
     # ---------- 공통 호출 ----------
     def get(self, path, tr_id, params, retries=3, tr_cont="", with_headers=False):
@@ -160,12 +173,49 @@ class Kis:
                     res = json.loads(r.read().decode())
                     got = dict(r.headers)
                 if str(res.get("rt_cd", "0")) != "0":
-                    raise KisError("%s: %s" % (res.get("msg_cd"), res.get("msg1")))
+                    message = "%s: %s" % (res.get("msg_cd"), res.get("msg1"))
+                    raise KisError(message, retryable=(res.get("msg_cd") == "EGW00201"))
                 return (res, got) if with_headers else res
-            except (urllib.error.HTTPError, urllib.error.URLError, KisError) as e:
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, KisError) as e:
                 last = e
-                time.sleep(1.5 * (i + 1))
-        raise KisError("API 호출 실패 (%s): %s" % (tr_id, last))
+                if isinstance(e, KisError):
+                    retryable = e.retryable
+                elif isinstance(e, urllib.error.HTTPError):
+                    retryable = e.code in (408, 429) or e.code >= 500
+                else:
+                    retryable = True
+                if not retryable:
+                    raise KisError("API 호출 실패 (%s): %s" % (tr_id, e)) from e
+                if i < retries - 1:
+                    time.sleep(1.5 * (i + 1))
+        raise KisError("API 호출 실패 (%s): %s" % (tr_id, last), retryable=True)
+
+    def index_ohlc(self, d1, d2):
+        """KOSPI200 business-date series; never infer a historical index from today's options."""
+        key = (d1, d2)
+        if key in self._index_cache:
+            return self._index_cache[key]
+        start, stop = dt.date.fromisoformat(d1), dt.date.fromisoformat(d2)
+        found, cur = {}, start
+        while cur <= stop:
+            end = min(stop, cur + dt.timedelta(days=90))
+            result = self.get("/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice",
+                              "FHKUP03500100", {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": "2001",
+                              "FID_INPUT_DATE_1": cur.strftime("%Y%m%d"),
+                              "FID_INPUT_DATE_2": end.strftime("%Y%m%d"), "FID_PERIOD_DIV_CODE": "D"})
+            for row in result.get("output2") or []:
+                raw_date = str(row.get("stck_bsop_date", "")).strip()
+                if len(raw_date) != 8 or not raw_date.isdigit():
+                    continue
+                day = "%s-%s-%s" % (raw_date[:4], raw_date[4:6], raw_date[6:])
+                value = _f(row.get("bstp_nmix_prpr"))
+                if d1 <= day <= d2 and value is not None and value > 0:
+                    found[day] = value
+            cur = end + dt.timedelta(days=1)
+            if cur <= stop:
+                time.sleep(0.15)
+        self._index_cache[key] = found
+        return found
 
     # ---------- 거래소 휴장일 ----------
     def closed_days(self, bass_dt, pages=12):
@@ -279,7 +329,8 @@ class Kis:
         while cur <= stop:
             end = min(stop, cur + dt.timedelta(days=130))
             for r in self._daily_page(code, cur.strftime("%Y%m%d"), end.strftime("%Y%m%d")):
-                seen[r["date"]] = r
+                if start.isoformat() <= r["date"] <= stop.isoformat():
+                    seen[r["date"]] = r
             if end >= stop:
                 break
             cur = end + dt.timedelta(days=1)
@@ -303,7 +354,7 @@ class Kis:
                 "date": "%s-%s-%s" % (date[:4], date[4:6], date[6:]),
                 "open": _f(r.get("futs_oprc")), "high": _f(r.get("futs_hgpr")),
                 "low": _f(r.get("futs_lwpr")), "close": _f(r.get("futs_prpr")),
-                "volume": _i(r.get("acml_vol")),
+                "volume": _i(r.get("acml_vol")) if str(r.get("acml_vol", "")).strip() else None,
             })
         return out
 
@@ -312,7 +363,7 @@ def implied_index(board):
     """
     풋-콜 패리티로 지수를 역산한다:  지수 ≈ 행사가 + 콜종가 - 풋종가
 
-    전광판이 등가에서 멀리 떨어진 행사가만 내줘도 지수는 정확히 나온다.
+    이자·배당·체결시각 차이를 생략한 참고 추정치이며 정확한 현물지수가 아니다.
     (2026-08-28 예: 1350 + 0.41 - 260.7 = 1089.7 → 실제 KOSPI200 1088.6)
     응답의 nmix_sdpr 은 지수가 아니어서 쓰지 않는다.
     """
@@ -333,7 +384,7 @@ def implied_index(board):
 def _f(v):
     try:
         f = float(str(v).strip())
-        return None if f == 0 else f
+        return f if math.isfinite(f) else None
     except (TypeError, ValueError):
         return None
 

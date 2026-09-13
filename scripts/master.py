@@ -23,10 +23,11 @@ import io
 import json
 import os
 import re
-import ssl
 import sys
 import urllib.request
+import urllib.error
 import zipfile
+from public_data import atomic_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "data", "optcodes.json")
@@ -43,11 +44,10 @@ KST = dt.timezone(dt.timedelta(hours=9))
 
 
 def download():
-    ssl._create_default_https_context = ssl._create_unverified_context
     raw = urllib.request.urlopen(URL, timeout=90).read()
     z = zipfile.ZipFile(io.BytesIO(raw))
     name = z.namelist()[0]
-    return z.read(name).decode("cp949", errors="replace"), name
+    return z.read(name).decode("cp949"), name
 
 
 def parse(text):
@@ -146,15 +146,26 @@ def main():
         text, fname = download()
     except Exception as e:
         print("실패: %s" % e)
-        print("회사 네트워크가 막고 있을 수 있습니다. 개인 네트워크에서 다시 시도해 보세요.")
-        return 1
+        if isinstance(e, urllib.error.HTTPError):
+            return 3 if e.code in (408, 429) or e.code >= 500 else 2
+        return 3 if isinstance(e, (urllib.error.URLError, TimeoutError, OSError)) else 2
     print("  받음: %s  (%d줄)" % (fname, len(text.splitlines())))
 
     rows = parse(text)
     doc, unmapped = build(rows, dump=args.dump)
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    json.dump(doc, open(OUT, "w", encoding="utf-8"), ensure_ascii=False)
+    if not doc["months"]:
+        print("유효한 종목코드가 없습니다 — 이전 마스터를 보존합니다.")
+        return 2
+    if os.path.exists(OUT):
+        old = json.load(open(OUT, encoding="utf-8"))
+        for ym, contracts in old.get("months", {}).items():
+            existing = doc["months"].setdefault(ym, {})
+            for strike, sides in contracts.items():
+                for side, code in sides.items():
+                    existing.setdefault(strike, {}).setdefault(side, code)
+    atomic_json(OUT, doc)
 
     print("\n최근월물: %s" % doc["near_month"])
     print("월물별 행사가 개수:")

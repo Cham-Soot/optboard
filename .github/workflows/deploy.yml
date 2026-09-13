@@ -1,0 +1,57 @@
+name: 공개 화면 배포
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "viewer_template.html"
+      - "assets/**"
+      - "scripts/**"
+      - "tests/**"
+      - "data/**"
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: optboard-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install --quiet openpyxl==3.1.5
+      - name: 수집 및 개인 메모 로직 검증
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py'
+          node --test tests/memo-core.test.mjs
+      - name: 허용한 공개 파일만 배포 폴더에 생성
+        run: |
+          python scripts/build_viewer.py --site-dir _site
+          python scripts/verify_public.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - uses: actions/deploy-pages@v4
+        id: deploy

@@ -1,0 +1,45 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function owner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.uid == 'SET_OWNER_UID_BEFORE_DEPLOY';
+    }
+    function validMarks(m) {
+      return m is map && m.keys().hasOnly(['cH', 'cL', 'pH', 'pL'])
+        && (!('cH' in m) || m.cH in ['box', 'ul'])
+        && (!('cL' in m) || m.cL in ['box', 'ul'])
+        && (!('pH' in m) || m.pH in ['box', 'ul'])
+        && (!('pL' in m) || m.pL in ['box', 'ul']);
+    }
+    function validEntry(d) {
+      return d.keys().hasAll(['marks', 'memo1', 'memo2', 'rev'])
+        && d.keys().hasOnly(['marks', 'memo1', 'memo2', 'rev', 'updatedAt'])
+        && validMarks(d.marks)
+        && d.memo1 is string && d.memo1.size() <= 4000
+        && d.memo2 is string && d.memo2.size() <= 4000
+        && d.rev is int && d.rev >= 0;
+    }
+    match /users/{uid}/entries/{key} {
+      allow read: if owner(uid);
+      allow create: if owner(uid) && key.matches('[0-9]{4}[|][0-9]+([.][0-9]+)?[|][0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && validEntry(request.resource.data) && request.resource.data.rev == 1
+        && request.resource.data.updatedAt == request.time;
+      allow update: if owner(uid) && validEntry(request.resource.data)
+        && request.resource.data.rev == resource.data.rev + 1
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+    match /users/{uid}/history/{changeId} {
+      allow read: if owner(uid);
+      allow create: if owner(uid)
+        && request.resource.data.keys().hasOnly(['entryKey', 'previous', 'savedAt'])
+        && request.resource.data.entryKey is string
+        && validEntry(request.resource.data.previous)
+        && request.resource.data.savedAt == request.time;
+      allow update, delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
