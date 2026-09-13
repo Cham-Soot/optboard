@@ -92,7 +92,7 @@ python -X utf8 -m http.server 8765 --bind 127.0.0.1 --directory _site
 
 ```powershell
 python -X utf8 -m unittest discover -s tests -p 'test_*.py'
-node --test tests/memo-core.test.mjs
+node --test tests/*.test.mjs
 python -X utf8 scripts/verify_public.py
 ```
 

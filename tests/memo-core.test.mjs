@@ -52,3 +52,38 @@ test('marking pairs are stored as one atomic field',()=>{
   const a=new MemoStore(memory(),'a');const marks={cH:'box',pL:'box',cL:'ul',pH:'ul'};a.edit(KEY,{marks});
   assert.deepEqual(a.view()[KEY].marks,marks);assert.deepEqual(Object.keys(a.submission(KEY)),['marks']);
 });
+
+const PLAN='2610|plan|2026-09-11';
+test('v3 backup roundtrips colors and active or cleared shared starts',()=>{
+  const rows={[KEY]:{...emptyEntry(),colors:{cH:'green',pL:'yellow'}},[PLAN]:{anchor:'cH',rev:0},'2611|plan|2026-09-11':{anchor:'',rev:0}};
+  assert.deepEqual(decodeBackup(encodeBackup(rows)),rows);
+});
+test('old backup import preserves new colors and unrelated start points',()=>{
+  const a=new MemoStore(memory(),'a');a.edit(KEY,{colors:{cH:'blue'},memo1:'before'});a.edit(PLAN,{anchor:'pL'});
+  a.importBackup({marks:{[KEY]:{cH:'box'}},memos:{[KEY]:['old','']}});
+  assert.deepEqual(a.view()[KEY].colors,{cH:'blue'});assert.equal(a.view()[PLAN].anchor,'pL');
+});
+test('v2 cache migration preserves pending edits without modifying the original cache',()=>{
+  const disk=memory(),old=JSON.stringify({version:2,records:{[KEY]:{marks:{},memo1:'saved',memo2:'',rev:1}},pending:{[KEY]:{memo1:{base:'saved',value:'offline',id:'old'}}}});
+  disk.setItem('v2',old);const a=new MemoStore(disk,'v3',()=>{},'v2');a.edit(PLAN,{anchor:'cL'});
+  assert.equal(a.view()[KEY].memo1,'offline');assert.equal(disk.getItem('v2'),old);
+  assert.equal(new MemoStore(disk,'v3').view()[PLAN].anchor,'cL');
+});
+test('competing start edits preserve both choices and resolve with revision checks',()=>{
+  const a=new MemoStore(memory(),'a');a.edit(PLAN,{anchor:'cH'});
+  const result=mergeSubmission({anchor:'pL',rev:1},a.submission(PLAN));a.setConflict(PLAN,result);
+  assert.deepEqual(result.conflicts,['anchor']);assert.equal(a.view()[PLAN].anchor,'cH');
+  a.resolve(PLAN,'mine');assert.equal(mergeSubmission(a.records[PLAN],a.submission(PLAN)).next.rev,2);
+});
+test('color changes merge with independent memo edits',()=>{
+  const a=new MemoStore(memory(),'a');a.edit(KEY,{colors:{cL:'red'}});
+  const result=mergeSubmission({...emptyEntry(),memo1:'phone',rev:1},a.submission(KEY));
+  assert.equal(result.next.memo1,'phone');assert.deepEqual(result.next.colors,{cL:'red'});
+});
+test('invalid colors and mixed plan shapes fail before changing stored data',()=>{
+  const a=new MemoStore(memory(),'a');a.edit(KEY,{memo1:'keep'});const before=JSON.stringify(a.view());
+  assert.throws(()=>a.edit(KEY,{memo1:'bad',colors:{cH:'purple'}}));
+  assert.throws(()=>a.edit(PLAN,{marks:{}}));assert.throws(()=>a.edit(KEY,{anchor:'cH'}));
+  assert.throws(()=>a.importBackup({plans:{[PLAN]:'other'}}));
+  assert.equal(JSON.stringify(a.view()),before);
+});

@@ -14,12 +14,12 @@ def public_doc(doc):
 
 
 def assert_public(doc, context="data"):
-    for key in ("marks", "memos", "MYDATA"):
+    for key in ("marks", "memos", "MYDATA", "colors", "plans", "anchor"):
         if doc.get(key):
             raise ValueError("%s: 개인 데이터가 공개 파일에 포함되어 있습니다 (%s)" % (context, key))
     seen = set()
     for row in doc.get("rows", []):
-        if row.get("memo1") or row.get("memo2") or row.get("marks") or row.get("memos"):
+        if any(row.get(key) for key in ("memo1", "memo2", "marks", "memos", "colors", "plans", "anchor")):
             raise ValueError("%s: 메모가 포함된 행을 공개할 수 없습니다" % context)
         identity = (row["date"], float(row["strike"]))
         if identity in seen:

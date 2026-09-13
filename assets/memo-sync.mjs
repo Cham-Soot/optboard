@@ -1,8 +1,10 @@
-import {MemoStore, emptyEntry, encodeBackup, decodeBackup, mergeSubmission, FIELDS} from './memo-core.mjs';
+import {MemoStore, emptyForKey, isPlanKey, encodeBackup, decodeBackup, mergeSubmission} from './memo-core.mjs';
+import * as markingEngine from './marking-core.mjs';
 import {syncConfig} from './firebase-config.mjs';
 
 const ui = window.optboardMemo;
 await ui.ready;
+ui.setMarkingEngine(markingEngine);
 const button = document.getElementById('btnLogin');
 const status = document.getElementById('syncStatus');
 const conflictButton = document.getElementById('btnConflicts');
@@ -10,7 +12,12 @@ let store = null, currentUser = null, auth = null, db = null, sdk = null, stopLi
 let ready = false, busy = false, timer = null, lastError = '', retryDelay = 2000;
 const legacy = ui.captureLegacy();
 const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fieldLabel = {marks:'마킹', memo1:'메모 1', memo2:'메모 2'};
+const fieldLabel = {marks:'마킹', colors:'네모 배경색', anchor:'자동 마킹 시작점', memo1:'메모 1', memo2:'메모 2'};
+const cellLabel = {cH:'콜 고가',cL:'콜 저가',pH:'풋 고가',pL:'풋 저가'};
+const recordLabel = key => isPlanKey(key) ? key.replace('|plan|',' · 전체 행사가 · ') : key.replaceAll('|',' · ');
+const recordSummary = row => Object.hasOwn(row,'anchor')
+  ? `자동 시작점: ${cellLabel[row.anchor] || '해제'}`
+  : `${esc(row.memo1 || '(메모 1 없음)')}<br>${esc(row.memo2 || '(메모 2 없음)')}<br>네모 배경색 ${Object.keys(row.colors || {}).length}칸`;
 
 function draw() {
   button.textContent = currentUser ? '로그아웃' : '개인 메모 로그인';
@@ -50,11 +57,12 @@ async function flush() {
       if (activeStore !== store || uid !== currentUser?.uid) break;
       if (activeStore.conflicts[key]) continue;
       const sent = activeStore.submission(key);
-      const ref = sdk.doc(db, 'users', uid, 'entries', key);
-      const historyRef = sdk.doc(sdk.collection(db, 'users', uid, 'history'));
+      const plan = isPlanKey(key);
+      const ref = sdk.doc(db, 'users', uid, plan ? 'markingPlans' : 'entries', key);
+      const historyRef = sdk.doc(sdk.collection(db, 'users', uid, plan ? 'markingHistory' : 'history'));
       const result = await sdk.runTransaction(db, async tx => {
         const snapshot = await tx.get(ref);
-        const result = mergeSubmission(snapshot.exists() ? snapshot.data() : emptyEntry(), sent);
+        const result = mergeSubmission(snapshot.exists() ? snapshot.data() : emptyForKey(key), sent);
         if (!result.conflicts.length && result.changed) {
           if (snapshot.exists()) tx.set(historyRef, {entryKey:key, previous:result.current, savedAt:sdk.serverTimestamp()});
           tx.set(ref, {...result.next, updatedAt:sdk.serverTimestamp()});
@@ -68,7 +76,7 @@ async function flush() {
     retryDelay = 2000;
   } catch (error) {
     lastError = error.code === 'permission-denied'
-      ? '메모 접근 권한을 확인해 주세요 · 수정 내용은 기기에 보관'
+      ? '저장 권한 또는 앱 버전을 확인해 주세요 · 새로고침 전 백업을 저장하세요'
       : '서버 연결 실패 · 수정 내용은 기기에 보관하고 재시도';
     retryDelay = Math.min(30000, retryDelay * 2);
   } finally {
@@ -104,7 +112,7 @@ async function login() {
 }
 
 function downloadBackup() {
-  const data = store ? encodeBackup(store.view()) : {...ui.captureLegacy(), formatVersion:2, exportedAt:new Date().toISOString()};
+  const data = store ? encodeBackup(store.view()) : {...ui.captureLegacy(), formatVersion:3, exportedAt:new Date().toISOString()};
   const link = document.createElement('a');
   const url = URL.createObjectURL(new Blob([JSON.stringify(data)], {type:'application/json'}));
   link.href = url;
@@ -118,9 +126,9 @@ function importPreview(input, title = '메모 백업 불러오기') {
   try { records = decodeBackup(input); } catch (error) { ui.toast(error.message); return; }
   const count = Object.keys(records).length;
   const place = store ? '본인 계정에 저장하고 다른 기기에도 반영합니다.' : '이 브라우저에 저장합니다.';
-  ui.openCard(`<h2>${esc(title)}</h2><p>${count}개 행의 마킹·메모를 ${place}</p>
-    <p>같은 행의 마킹·메모는 불러온 내용으로 바뀝니다. 다른 행은 유지됩니다.</p>
-    <div class="row"><button class="btn" id="importCancel">취소</button><button class="btn primary" id="importApply">${count}개 행 가져오기</button></div>`);
+  ui.openCard(`<h2>${esc(title)}</h2><p>${count}개 항목의 마킹·메모·시작점을 ${place}</p>
+    <p>같은 행의 마킹·메모와 파일에 포함된 배경색·시작점이 바뀝니다. 다른 행과 파일에 없는 시작점은 유지됩니다.</p>
+    <div class="row"><button class="btn" id="importCancel">취소</button><button class="btn primary" id="importApply">${count}개 항목 가져오기</button></div>`);
   document.getElementById('importCancel').onclick = ui.closeCard;
   document.getElementById('importApply').onclick = () => {
     if (store) { store.importBackup(input); schedule(0); }
@@ -133,7 +141,7 @@ function importPreview(input, title = '메모 백업 불러오기') {
 function backupDialog() {
   const count = Object.keys(store ? store.view() : decodeBackup(ui.captureLegacy())).length;
   const legacyCount = Object.keys(decodeBackup(legacy)).length;
-  ui.openCard(`<h2>개인 메모 보관</h2><p>현재 ${count}개 행의 마킹·메모가 있습니다. 백업 파일은 개인 폴더에 보관하세요.</p>
+  ui.openCard(`<h2>개인 메모 보관</h2><p>현재 ${count}개 저장 항목이 있습니다. 마킹·메모·배경색·자동 시작점을 함께 백업합니다. 파일은 개인 폴더에 보관하세요.</p>
     <div class="row"><button class="btn primary" id="backupDownload">백업 파일 저장</button><button class="btn" id="backupImport">백업 파일 불러오기</button></div>
     ${store && legacyCount ? `<p>이 브라우저의 이전 메모 ${legacyCount}개 행도 가져올 수 있습니다.</p><button class="btn" id="legacyImport">이전 메모 가져오기</button>` : ''}
     ${store ? '<div class="row"><button class="btn" id="historyOpen">최근 수정 전 내용 보기</button></div>' : ''}
@@ -150,12 +158,13 @@ function backupDialog() {
 async function historyDialog() {
   if (!store || !navigator.onLine) return ui.toast('로그인과 인터넷 연결이 필요합니다');
   try {
-    const history = await sdk.getDocs(sdk.query(sdk.collection(db, 'users', currentUser.uid, 'history'),
-      sdk.orderBy('savedAt', 'desc'), sdk.limit(20)));
-    const rows = history.docs.map(item => item.data());
+    const histories = await Promise.all(['history','markingHistory'].map(name => sdk.getDocs(sdk.query(
+      sdk.collection(db, 'users', currentUser.uid, name), sdk.orderBy('savedAt', 'desc'), sdk.limit(20)))));
+    const rows = histories.flatMap(history => history.docs.map(item => item.data()))
+      .sort((a,b)=>(b.savedAt?.toMillis() || 0)-(a.savedAt?.toMillis() || 0)).slice(0,20);
     ui.openCard(`<h2>최근 수정 전 내용</h2><p>최근 20건입니다. 복원도 새 수정으로 저장됩니다.</p>
-      ${rows.length ? rows.map((row,i) => `<div class="history-item"><b>${esc(row.entryKey.replaceAll('|',' · '))}</b>
-      <p>${esc(row.previous.memo1 || '(메모 1 없음)')}<br>${esc(row.previous.memo2 || '(메모 2 없음)')}</p>
+      ${rows.length ? rows.map((row,i) => `<div class="history-item"><b>${esc(recordLabel(row.entryKey))}</b>
+      <p>${recordSummary(row.previous)}</p>
       <button class="btn tiny" data-restore="${i}">이 내용 복원</button></div>`).join('') : '<p>아직 수정 이력이 없습니다.</p>'}
       <div class="row"><button class="btn" id="historyClose">닫기</button></div>`);
     document.getElementById('historyClose').onclick = ui.closeCard;
@@ -175,7 +184,7 @@ function conflictsDialog() {
   const visible = store.view();
   const displayedRevisions = Object.fromEntries(keys.map(key => [key, store.records[key]?.rev]));
   ui.openCard(`<h2>두 기기에서 수정한 메모</h2><p>같은 항목이 서로 다르게 수정되었습니다. 두 내용 중 유지할 것을 선택하세요.</p>
-    ${keys.map((key,i) => `<div class="history-item"><b>${esc(key.replaceAll('|',' · '))}</b>
+    ${keys.map((key,i) => `<div class="history-item"><b>${esc(recordLabel(key))}</b>
       ${store.conflicts[key].map(field => `<p>${fieldLabel[field]}<br>이 기기: ${esc(typeof visible[key][field] === 'string' ? visible[key][field] : JSON.stringify(visible[key][field]))}<br>
       서버: ${esc(typeof store.records[key][field] === 'string' ? store.records[key][field] : JSON.stringify(store.records[key][field]))}</p>`).join('')}
       <div class="row"><button class="btn" data-conflict="${i}" data-choice="remote">서버 내용 유지</button><button class="btn primary" data-conflict="${i}" data-choice="mine">이 기기 내용 유지</button></div></div>`).join('')}
@@ -246,22 +255,27 @@ if (syncConfig.enabled) {
         return draw();
       }
       try {
-        store = new MemoStore(localStorage, 'optboard.private.v2.' + user.uid, draw);
+        store = new MemoStore(localStorage, 'optboard.private.v3.' + user.uid, draw, 'optboard.private.v2.' + user.uid);
         const listeningStore = store;
         draw();
-        stopListening = sdk.onSnapshot(sdk.collection(db, 'users', user.uid, 'entries'),
+        const fresh = new Set();
+        const stops = ['entries','markingPlans'].map(name => sdk.onSnapshot(sdk.collection(db, 'users', user.uid, name),
           {includeMetadataChanges:true}, snapshot => {
             if (store !== listeningStore || currentUser?.uid !== user.uid) return;
             const records = {};
             snapshot.docs.forEach(item => { records[item.id] = item.data(); });
             store.receive(records);
-            if (!snapshot.metadata.fromCache) { ready = true; lastError = ''; schedule(0); }
+            if (!snapshot.metadata.fromCache) {
+              fresh.add(name); ready = fresh.size === 2;
+              if (ready) { lastError = ''; schedule(0); }
+            }
             draw();
           }, error => {
             if (store !== listeningStore || currentUser?.uid !== user.uid) return;
             lastError = error.code === 'permission-denied' ? '메모 접근 권한을 확인해 주세요' : '개인 메모 연결이 끊겼습니다';
             draw();
-          });
+          }));
+        stopListening = () => stops.forEach(stop => stop());
       } catch (_) { lastError = '기기 메모를 읽지 못했습니다. 기존 데이터를 보존하고 백업을 확인해 주세요'; draw(); }
     });
     button.disabled = false;

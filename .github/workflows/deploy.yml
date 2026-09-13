@@ -44,7 +44,7 @@ jobs:
       - name: 수집 및 개인 메모 로직 검증
         run: |
           python -m unittest discover -s tests -p 'test_*.py'
-          node --test tests/memo-core.test.mjs
+          node --test tests/*.test.mjs
       - name: 허용한 공개 파일만 배포 폴더에 생성
         run: |
           python scripts/build_viewer.py --site-dir _site

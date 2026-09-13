@@ -10,7 +10,7 @@ from expiry_notice import expiry_of
 from public_data import public_doc, assert_public, atomic_json, script_json
 
 ROOT = Path(__file__).resolve().parent.parent
-ASSETS = ("memo-core.mjs", "memo-sync.mjs", "firebase-config.mjs")
+ASSETS = ("marking-core.mjs", "memo-core.mjs", "memo-sync.mjs", "firebase-config.mjs")
 
 
 def build(recent=3, site_dir=None, private=False):
@@ -46,6 +46,11 @@ def build(recent=3, site_dir=None, private=False):
         target = ROOT / ".private" / "내화면.html"
         target.parent.mkdir(parents=True, exist_ok=True)
         offline = render(docs, marks).replace('<script type="module" src="assets/memo-sync.mjs"></script>', '')
+        engine = (ROOT / "assets" / "marking-core.mjs").read_text(encoding="utf-8").replace("export ", "")
+        memo = (ROOT / "assets" / "memo-core.mjs").read_text(encoding="utf-8")
+        memo = memo.replace("import {CELLS, COLORS, isPlanKey} from './marking-core.mjs';", "").replace("export {isPlanKey};", "").replace("export ", "")
+        engine = '<script>(()=>{' + engine + memo + '\nwindow.optboardMarkingEngine={deriveMarks,priceAt,planKey,decodeBackup};})();</script>\n'
+        offline = offline.replace('<script>', engine + '<script>', 1)
         target.write_text(offline, encoding="utf-8")
         print("개인용 화면: " + str(target))
     if site_dir:
