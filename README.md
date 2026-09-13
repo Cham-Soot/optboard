@@ -27,7 +27,7 @@ KIS API의 KOSPI200 옵션 시세를 GitHub Actions로 수집하고 GitHub Pages
 
 ## 최초 연결
 
-Firebase 설정의 실제 완료 여부는 `assets/firebase-config.mjs`의 `enabled` 값과 콘솔 배포 상태로 확인합니다. `enabled: false`이면 기기 간 동기화가 활성화되지 않은 상태입니다.
+현재 `optboard-memo`의 Google 로그인과 서울 지역 Firestore 연결을 완료했으며 `enabled: true`입니다. 지정한 본인 계정으로 사용합니다. 기존 개인 메모 129개 행을 가져와 원본과 일치함을 확인했습니다. 아래 절차는 새 프로젝트로 이전하거나 다시 구성할 때 참고합니다.
 
 1. Firebase **Spark** 프로젝트를 만들고 결제 계정을 연결하지 않습니다. Google Analytics는 필수가 아닙니다.
 2. 웹 앱을 등록하고 공개 웹 설정을 `assets/firebase-config.mjs`의 `firebase`에 넣습니다. 서비스 계정 비밀키는 사용하지 않습니다.
@@ -96,4 +96,4 @@ node --test tests/memo-core.test.mjs
 python -X utf8 scripts/verify_public.py
 ```
 
-자동 테스트는 날짜 불일치, 부분 실패, 재조회, 공개·개인 자료 분리, 백업·삭제 복원, 두 기기 수정 충돌 등을 확인합니다. 실제 Firebase 권한과 기기 간 동기화는 연결 후 추가 확인해야 합니다.
+자동 테스트는 날짜 불일치, 부분 실패, 재조회, 공개·개인 자료 분리, 백업·삭제 복원, 두 기기 수정 충돌 등을 확인합니다. 실제 본인 계정의 메모·마킹 저장과 다시 불러오기를 확인했습니다. 배포된 규칙의 접근 제어 10개 사례를 서버에서 검사했고, 실제 비로그인 읽기 요청은 HTTP 403으로 차단됐습니다. 서로 다른 실제 기기에서의 사용은 같은 계정으로 로그인하여 동기화 완료 표시와 내용을 확인합니다.

@@ -20,6 +20,7 @@ function draw() {
   conflictButton.textContent = `수정 충돌 ${conflicts}건`;
   let text = '로그인 전 · 메모는 이 기기에 저장';
   if (!syncConfig.enabled) text = '이 기기에 저장 · 동기화 설정 전';
+  else if (!currentUser && lastError) text = lastError;
   else if (currentUser && !store) text = lastError || '본인 계정 확인 중';
   else if (store) {
     if (store.storageError) text = '기기 저장 실패 · 백업 파일을 저장해 주세요';
@@ -81,7 +82,7 @@ async function login() {
   if (!auth) return ui.toast('동기화 설정을 아직 불러오지 못했습니다');
   if (currentUser) {
     if (store && Object.keys(store.pending).length) {
-      ui.toast('전송 대기 메모가 있습니다. 동기화하거나 백업한 뒤 로그아웃하세요');
+      ui.toast('전송 대기 메모가 있습니다. 백업을 저장하고, 동기화가 완료된 뒤 로그아웃하세요');
       return;
     }
     await sdk.signOut(auth);
@@ -93,6 +94,7 @@ async function login() {
     provider.setCustomParameters({prompt:'select_account'});
     await sdk.signInWithPopup(auth, provider);
   } catch (error) {
+    console.warn('Firebase login error:', error.code || 'unknown');
     if (!['auth/popup-closed-by-user', 'auth/cancelled-popup-request'].includes(error.code)) {
       lastError = error.code === 'auth/popup-blocked' ? '로그인 팝업을 허용해 주세요' : '로그인하지 못했습니다. 네트워크와 허용 도메인을 확인하세요';
       ui.toast(lastError);

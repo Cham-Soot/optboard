@@ -4,7 +4,7 @@ service cloud.firestore {
     function owner(uid) {
       return request.auth != null
         && request.auth.uid == uid
-        && request.auth.uid == 'SET_OWNER_UID_BEFORE_DEPLOY';
+        && request.auth.uid == 'joCqZrG5yAgzJn0cigwozuVZDEs2';
     }
     function validMarks(m) {
       return m is map && m.keys().hasOnly(['cH', 'cL', 'pH', 'pL'])
