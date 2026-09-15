@@ -258,6 +258,7 @@ td.cell.m-box-lo .v,td.cell.m-ul-lo .v{color:var(--lo);font-weight:600}
     <button class="btn" id="btnTheme" title="화면 밝기 전환">◐</button>
   </header>
   <div class="sync-info"><span id="syncStatus" role="status" aria-live="polite">메모는 이 기기에 저장됩니다</span><span id="collectionHealth" role="status"></span></div>
+  <details id="collectionDetails" hidden><summary>시세 수집 내역</summary><div id="collectionDetailText"></div></details>
 
   <div class="banner" id="banner">
     <span id="bannerText"></span>
@@ -321,6 +322,9 @@ td.cell.m-box-lo .v,td.cell.m-ul-lo .v{color:var(--lo);font-weight:600}
 <style>
 .sync-info{display:flex;flex-wrap:wrap;gap:10px 24px;padding:8px 24px;font-size:12px;color:var(--muted)}
 .sync-info [data-state="error"]{color:var(--hi)}
+#collectionDetails{margin:0 24px 8px;font-size:12px;color:var(--muted)}
+#collectionDetails summary{cursor:pointer}
+#collectionDetailText{white-space:pre-line;overflow-wrap:anywhere;line-height:1.7;padding:8px 0}
 .history-item{padding:14px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 #btnConflicts[hidden]{display:none}
 header{flex-wrap:wrap}
@@ -1064,8 +1068,14 @@ window.optboardMemo={
   buildExpirySelect();
   try{
     const response=await fetch('data/collection_status.json',{cache:'no-store'});
-    if(response.ok){const health=await response.json();const names={complete:'수집 확인 완료',incomplete:'일부 미완료',failed:'수집 실패',closed:'휴장일'};
-      $('#collectionHealth').textContent='시세 '+(health.date||'')+' · '+(names[health.status]||'확인 필요');}
+    if(response.ok){const health=await response.json();const names={complete:'당일 수집 완료',complete_with_warnings:'당일 수집 완료 · 과거 자료 확인 필요',incomplete:'당일 일부 미완료',failed:'수집 실패',closed:'휴장일'};
+      const daily=health.daily||{},history=health.history||{};
+      $('#collectionHealth').textContent='시세 '+(health.date||'')+' · '+(names[health.status]||'확인 필요')+
+        (daily.expected_count?' · '+daily.complete_count+'/'+daily.expected_count+' 종목':'');
+      const lines=['확인 시각: '+(health.checked||'확인 필요'),...(health.errors||[]),...(health.warnings||[])];
+      for(const day of history.days||[])lines.push(day.expiry+' 월물 · '+day.date+' · '+day.complete_count+'/'+day.expected_count+' 종목 확인');
+      $('#collectionDetailText').textContent=lines.join('\n');
+      $('#collectionDetails').hidden=false;}
   }catch(e){}
 })();
 </script>

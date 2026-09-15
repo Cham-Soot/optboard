@@ -33,6 +33,7 @@ jobs:
     outputs:
       code: ${{ steps.collect.outputs.code }}
       retry: ${{ steps.collect.outputs.retry }}
+      detail: ${{ steps.collect.outputs.detail }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -84,7 +85,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RETRY: ${{ steps.collect.outputs.retry }}
-          INPUT_DATE: ${{ inputs.date }}
+          INPUT_DATE: ${{ steps.collect.outputs.date }}
           INPUT_EXPIRY: ${{ inputs.expiry }}
         run: |
           gh workflow run collect.yml --ref "$GITHUB_REF_NAME" -f retry="$((RETRY+1))" -f date="$INPUT_DATE" -f expiry="$INPUT_EXPIRY"
@@ -106,12 +107,19 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: 불완전 수집을 성공으로 표시하지 않음
+      - name: 당일 수집 및 배포 결과 확인
         env:
           CODE: ${{ needs.collect.outputs.code }}
           COLLECT_RESULT: ${{ needs.collect.result }}
           PAGES_RESULT: ${{ needs.pages.result }}
+          DETAIL: ${{ needs.collect.outputs.detail }}
         run: |
-          test "$CODE" = "0"
-          test "$COLLECT_RESULT" = "success"
-          test "$PAGES_RESULT" = "success"
+          printf '%s\n' "$DETAIL" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CODE" != "0" ]; then
+            printf '::error::%s\n' "시세 수집 확인 필요 (코드 $CODE): $DETAIL"
+            exit 1
+          fi
+          if [ "$COLLECT_RESULT" != "success" ] || [ "$PAGES_RESULT" != "success" ]; then
+            printf '::error::%s\n' "저장 또는 배포 실패: 수집 작업=$COLLECT_RESULT, 배포=$PAGES_RESULT"
+            exit 1
+          fi

@@ -109,6 +109,51 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(collect.main(),2)
         provider.assert_not_called()
 
+    def run_main(self, dated=False):
+        cal={'from':'2026-01-01','to':'2027-01-01','closed':[],'updated':DAY}
+        self.api.option_expiries.return_value=['202610']
+        argv=['collect'] + (['--date',DAY] if dated else [])
+        with patch.object(collect,'calendar_data',return_value=cal),patch.object(collect,'load_config',return_value=CFG),patch.object(collect,'Kis',return_value=self.api),patch.object(sys,'argv',argv):
+            code=collect.main()
+        return code,json.loads((Path(self.tmp.name)/'collection_status.json').read_text(encoding='utf-8'))
+
+    def test_transient_invalid_price_rechecks_only_failed_contract(self):
+        self.api.daily_ohlc.side_effect=[[{**price(),'high':3}],[price()],[price()]]
+        code,report=self.run_main(dated=True)
+        self.assertEqual(code,0)
+        self.assertEqual(report['status'],'complete')
+        self.assertEqual([call.args[0] for call in self.api.daily_ohlc.call_args_list],['C','P','C'])
+        self.assertEqual(self.read()['rows'][0]['c'],[10,12,8,11])
+
+    def test_persistent_invalid_price_still_fails(self):
+        self.api.daily_ohlc.return_value=[{**price(),'high':3}]
+        code,report=self.run_main(dated=True)
+        self.assertEqual(code,4)
+        self.assertEqual(report['status'],'incomplete')
+        self.assertEqual(self.read()['rows'],[])
+        self.assertIn('고가=3',report['errors'][0])
+
+    def test_historical_conflict_remains_visible_without_failing_complete_today(self):
+        doc=document()
+        collect.upsert(doc,'2026-09-10',1100,[1,2,1,2],[20,22,18,21])
+        collect.save_doc(doc)
+        self.api.daily_ohlc.side_effect=lambda code,start,end: [price()] if start=='20260911' else [{**price('2026-09-10'),'volume':0}]
+        with patch.object(collect,'recent_open_days',return_value=['2026-09-10']):
+            code,report=self.run_main()
+        self.assertEqual(code,0)
+        self.assertEqual(report['status'],'complete_with_warnings')
+        self.assertEqual(report['daily'],{'expected_count':2,'complete_count':2})
+        self.assertEqual(report['history']['incomplete_count'],2)
+        self.assertTrue(report['warnings'])
+        saved=self.read()
+        self.assertEqual(saved['rows'][0]['c'],[1,2,1,2])
+        self.assertEqual(saved['collection']['2026-09-10']['contracts']['1100|c']['status'],'invalid')
+        self.api.daily_ohlc.side_effect=None
+        self.api.daily_ohlc.return_value=[price()]
+        _,later=self.run_main(dated=True)
+        self.assertEqual(later['status'],'complete_with_warnings')
+        self.assertEqual(later['history']['incomplete_count'],2)
+
     def test_missing_contract_date_is_repaired_even_when_date_exists(self):
         self.api.daily_ohlc.side_effect=lambda code,*args: [price()] if code=='C' else []
         with self.assertRaises(collect.CollectionIncomplete):collect.collect_one(self.api,'202610',CFG,DAY)

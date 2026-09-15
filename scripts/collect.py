@@ -149,7 +149,7 @@ def quote_values(row):
         raise ValueError("거래 시세의 OHLC 일부 누락")
     op, high, low, close = values
     if not low <= min(op, close) <= max(op, close) <= high:
-        raise ValueError("시가·고가·저가·종가 관계 불일치")
+        raise ValueError("시가·고가·저가·종가 관계 불일치 (시가=%s, 고가=%s, 저가=%s, 종가=%s)" % tuple(values))
     return values, "ok"
 
 
@@ -277,14 +277,35 @@ def heal_missing(api, targets, cfg, today):
                                    retryable=any(getattr(e, "retryable", False) for e in errors))
 
 
+def collection_summary(targets, cfg, day):
+    daily = {"expected_count": 0, "complete_count": 0}
+    history = {"status": "complete", "incomplete_count": 0, "days": []}
+    for ym in targets:
+        states = load_doc(ym, cfg["PRODUCT"]).get("collection", {})
+        current = states.get(day, {})
+        for key in daily:
+            daily[key] += current.get(key, 0)
+        for previous_day, state in sorted(states.items()):
+            if previous_day >= day or state.get("status") == "complete":
+                continue
+            expected, complete = state.get("expected_count", 0), state.get("complete_count", 0)
+            history["days"].append({"expiry": ym, "date": previous_day,
+                                    "expected_count": expected, "complete_count": complete})
+            history["incomplete_count"] += max(0, expected - complete)
+    if history["days"]:
+        history["status"] = "incomplete"
+    return daily, history
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--expiry", help="월물 YYYYMM")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--date", help="실제 거래일 YYYY-MM-DD")
+    ap.add_argument("--heal", action="store_true", help="지정일 수집과 함께 최근 7일 누락분 복구")
     ap.add_argument("--force", action="store_true", help="장 마감 시각 검사만 생략")
     args = ap.parse_args()
-    report = {"checked": kst_now().isoformat(timespec="seconds"), "status": "failed", "errors": []}
+    report = {"checked": kst_now().isoformat(timespec="seconds"), "status": "failed", "errors": [], "warnings": []}
     try:
         ym_arg = check_expiry(args.expiry) if args.expiry else None
         cfg, cal, now = load_config(), calendar_data(), kst_now()
@@ -310,19 +331,30 @@ def main():
         for ym in targets:
             try:
                 collect_one(api, ym, cfg, day.isoformat())
+            except CollectionIncomplete as exc:
+                print("미완료 종목만 한 번 더 확인합니다: " + str(exc))
+                time.sleep(2)
+                try:
+                    collect_range(api, ym, cfg, [day.isoformat()], repair_only=True)
+                except KisError as retry_error:
+                    errors.append(retry_error)
             except KisError as exc:
                 errors.append(exc)
-        if not args.date and not ym_arg:
+        if args.heal or (not args.date and not ym_arg):
             try:
                 heal_missing(api, targets, cfg, day.isoformat())
             except KisError as exc:
-                errors.append(exc)
+                report["warnings"].append(str(exc)[:1200])
         report["targets"] = targets
+        report["daily"], report["history"] = collection_summary(targets, cfg, day.isoformat())
+        if report["history"]["status"] == "incomplete":
+            report["warnings"].insert(0, "과거 자료 %d건은 확인이 필요합니다. 기존 가격과 미완료 표시는 보존했습니다." %
+                                      report["history"]["incomplete_count"])
         if errors:
             report["errors"] = [str(e)[:600] for e in errors]
             report["status"] = "incomplete"
             return 3 if any(getattr(e, "retryable", False) for e in errors) else 4
-        report["status"] = "complete"
+        report["status"] = "complete_with_warnings" if report["warnings"] else "complete"
         return 0
     except (ValueError, FileNotFoundError) as exc:
         report["errors"] = [str(exc)]
@@ -335,6 +367,8 @@ def main():
         print("수집 상태: " + report["status"])
         for message in report["errors"]:
             print(message)
+        for message in report["warnings"]:
+            print("주의: " + message)
 
 
 if __name__ == "__main__":
