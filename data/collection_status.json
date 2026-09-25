@@ -1,1 +1,1 @@
-{"checked":"2026-09-24T23:22:14+09:00","status":"closed","errors":[],"warnings":[],"date":"2026-09-24"}
+{"checked":"2026-09-25T21:47:08+09:00","date":"2026-09-25","status":"failed","errors":["수집 준비 단계 실패: calendar_sync"],"stage":"calendar_sync"}
