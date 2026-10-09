@@ -73,7 +73,7 @@ Spark 무료 한도 내에서 사용합니다. 결제 계정을 연결하지 않
    - URL: `https://api.github.com/repos/Cham-Soot/optboard/actions/workflows/collect.yml/dispatches`
    - 실행 시각: Custom, 시간대 `Asia/Seoul`, 월~금, 16시 12분
    - Advanced → Request method `POST`, Request body `{"ref":"main"}`
-   - Headers: `Authorization: Bearer <토큰>`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`, `User-Agent: optboard-cron`
+   - Headers는 한 줄에 하나씩 Key와 Value를 나눠 넣습니다: `Authorization` = `Bearer <토큰>`, `Accept` = `application/vnd.github+json`, `X-GitHub-Api-Version` = `2022-11-28`, `Content-Type` = `application/json`. `User-Agent`는 cron-job.org가 지원하지 않으므로 넣지 않습니다.
    - 실패 알림을 켭니다.
 3. 같은 작업을 복제해 18시 36분으로 바꿉니다.
 4. **Test run**에서 응답 `204`를 확인하고, GitHub Actions에 `workflow_dispatch` 실행이 생겼는지 봅니다. `401`·`403`은 토큰 권한, `404`는 주소나 저장소 선택, `422`는 본문의 `ref`를 확인합니다.
