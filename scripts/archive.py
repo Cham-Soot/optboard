@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+from collect import COMPLETE, NO_TRADE_CONFLICT
 from expiry_notice import expiry_of
 from public_data import public_doc, assert_public, atomic_json
 
@@ -31,6 +32,30 @@ RED, BLUE = "FFC8102E", "FF1B4FA8"
 def fmt_strike(s):
     s = float(s)
     return ("%g" % s) if s % 1 else str(int(s))
+
+
+def is_conflict(item):
+    return item.get("status") == "invalid" and item.get("error") == NO_TRADE_CONFLICT
+
+
+def seal_check(collection):
+    """(봉인을 막는 미완료 수, 확인 필요로 함께 보관할 거래량 0 상충 수)."""
+    blocking = conflicts = 0
+    for state in collection.values():
+        if state.get("status") == "complete":
+            continue
+        if not state.get("expected"):
+            blocking += 1
+            continue
+        for identity in state["expected"]:
+            item = state.get("contracts", {}).get(identity, {})
+            if item.get("status") in COMPLETE:
+                continue
+            if is_conflict(item):
+                conflicts += 1
+            else:
+                blocking += 1
+    return blocking, conflicts
 
 
 def this_month():
@@ -56,6 +81,7 @@ def write_xlsx(doc, marks, memos, path):
     font_b = Font(bold=True, color=BLUE)
     head_font = Font(bold=True)
     head_fill = PatternFill("solid", fgColor="FFF2EFE7")
+    conflict_fill = PatternFill("solid", fgColor="FFD9D9D9")  # 거래량 0 상충 — 확인 필요
 
     idx = {fmt_strike(r["strike"]) + "|" + r["date"]: r for r in doc["rows"]}
     wb = Workbook()
@@ -81,6 +107,11 @@ def write_xlsx(doc, marks, memos, path):
                       [mm[0] if mm else (r.get("memo1") or ""),
                        mm[1] if mm else (r.get("memo2") or "")])
             row = ws.max_row
+            contracts = doc.get("collection", {}).get(date, {}).get("contracts", {})
+            for side, first in (("c", 1), ("p", 6)):
+                if is_conflict(contracts.get(sk + "|" + side, {})):
+                    for col in range(first, first + 4):
+                        ws.cell(row=row, column=col).fill = conflict_fill
             mk = marks.get(k) or {}
             for cid, col in (("cH", 2), ("cL", 3), ("pH", 7), ("pL", 8)):
                 shape = mk.get(cid)
@@ -130,8 +161,9 @@ def main():
 
         doc = json.loads((Path(DATA) / (ex + ".json")).read_text(encoding="utf-8"))
         assert_public(doc, ex)
-        if doc.get("collection") and any(v.get("status") != "complete" for v in doc["collection"].values()):
-            print("  %s 수집 미완료 — 봉인하지 않습니다" % ex)
+        blocking, conflicts = seal_check(doc.get("collection", {}))
+        if blocking:
+            print("  %s 수집 미완료 %d건 — 봉인하지 않습니다" % (ex, blocking))
             continue
         if not doc.get("dates") or max(doc["dates"]) < expiry.isoformat():
             print("  %s 최종거래일 기록이 없습니다 — 봉인하지 않습니다" % ex)
@@ -149,6 +181,8 @@ def main():
         ok = write_xlsx(doc, {}, {}, out_xlsx)
         sealed.append((ex, doc, ok))
         print("  공개 시세 봉인 %s — 거래일 %d일, 행사가 %d개" % (ex, len(doc["dates"]), len(doc["strikes"])))
+        if conflicts:
+            print("    거래량 0 상충 %d건은 기존 값과 확인 필요 표시를 함께 보관했습니다 (엑셀 회색 칸)" % conflicts)
 
     write_index()
     if not sealed:

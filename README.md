@@ -49,7 +49,7 @@ Spark 무료 한도 내에서 사용합니다. 결제 계정을 연결하지 않
 
 ## 자동 수집과 배포
 
-- 예약: 월~금 한국시간 16:12, 18:36. 예약 실행은 지연되거나 누락될 수 있습니다.
+- 예약: 월~금 한국시간 16:12, 18:36에 cron-job.org가 실행을 요청합니다. GitHub 자체 예약(같은 시각)은 수 시간씩 늦게 시작하므로 예비로만 둡니다. 휴장일 실행은 `휴장일`로 끝납니다.
 - 거래일 달력은 하루 한 번 새로 확인합니다.
 - 종목마스터에서 코드를 얻고 **요청일의 KOSPI200 지수**로 행사가 범위를 정합니다. 현재 전광판 값을 과거 날짜에 붙이지 않습니다.
 - 계약별 일별 응답의 날짜, 가격 형식, OHLC 관계를 검사합니다. 응답 없음·오류·거래량 0을 구분합니다.
@@ -62,8 +62,21 @@ Spark 무료 한도 내에서 사용합니다. 결제 계정을 연결하지 않
 - 연결 오류 등 재시도 가능한 당일 실패만 최대 4회 새 실행을 요청합니다. 당일 불완전 수집 또는 저장·배포 실패는 최종 작업 결과에서 원인과 함께 실패로 표시합니다.
 - 예약이 지연되어 자정~16시 전에 시작하면 직전 마감 거래일을 수집합니다. 새 실행으로 재시도할 때도 대상 날짜를 고정합니다. 명시적으로 입력한 날짜는 바꾸지 않습니다.
 - 만기 안내는 화면 배너와 기존 GitHub 이슈 알림에서 확인합니다.
+- 만기가 지난 월물은 `archive/`에 보관합니다. 미완료가 거래량 0 상충뿐이면 기존 값과 확인 필요 표시를 함께 보관하고(엑셀 회색 칸), 그 밖의 누락·오류가 있으면 보관하지 않습니다.
 
 기존 시세 중 새 `collection` 확인 정보가 없는 구간은 종목별 완전성 검증 이전 자료입니다. 날짜가 있다는 이유만으로 모든 종목이 검증됐다고 보지 않습니다.
+
+## 정시 실행 (cron-job.org)
+
+1. GitHub → Settings → Developer settings → Fine-grained tokens에서 토큰을 만듭니다. Repository access는 `optboard`만, Repository permissions는 **Actions: Read and write**만 줍니다. 만료일을 기록해 두고 만료 전에 새 토큰으로 바꿉니다. 토큰은 저장소·`.env`에 넣지 않습니다.
+2. cron-job.org에서 작업을 만듭니다.
+   - URL: `https://api.github.com/repos/Cham-Soot/optboard/actions/workflows/collect.yml/dispatches`
+   - 실행 시각: Custom, 시간대 `Asia/Seoul`, 월~금, 16시 12분
+   - Advanced → Request method `POST`, Request body `{"ref":"main"}`
+   - Headers: `Authorization: Bearer <토큰>`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`, `User-Agent: optboard-cron`
+   - 실패 알림을 켭니다.
+3. 같은 작업을 복제해 18시 36분으로 바꿉니다.
+4. **Test run**에서 응답 `204`를 확인하고, GitHub Actions에 `workflow_dispatch` 실행이 생겼는지 봅니다. `401`·`403`은 토큰 권한, `404`는 주소나 저장소 선택, `422`는 본문의 `ref`를 확인합니다.
 
 ## 내 PC에서 실행
 

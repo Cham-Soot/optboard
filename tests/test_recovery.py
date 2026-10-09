@@ -69,5 +69,34 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(book.active['J2'].value)
         book.close()
 
+    def run_archive(self, contracts):
+        doc = {'expiry':'2507','label':'test','strikes':[100],'dates':['2025-07-10'],
+               'rows':[{'date':'2025-07-10','strike':100,'c':[5,5,5,5],'p':[1,2,1,2]}],
+               'collection':{'2025-07-10':{'status':'incomplete','expected':{'100|c':{},'100|p':{}},
+                                           'contracts':contracts}}}
+        atomic_json(self.root / 'data' / '2507.json', doc)
+        with patch.object(archive, 'ROOT', str(self.root)), patch.object(archive, 'DATA', str(self.root / 'data')), \
+             patch.object(archive, 'ARCH', str(self.root / 'archive')), patch.object(sys, 'argv', ['archive']):
+            self.assertEqual(archive.main(), 0)
+        return self.root / 'archive' / '2507.json'
+
+    def test_archive_seals_preserved_no_trade_conflict_as_needs_check(self):
+        sealed = self.run_archive({'100|c':{'status':'invalid','error':collect.NO_TRADE_CONFLICT},
+                                   '100|p':{'status':'ok'}})
+        doc = json.loads(sealed.read_text(encoding='utf-8'))
+        self.assertEqual(doc['rows'][0]['c'], [5,5,5,5])
+        self.assertEqual(doc['collection']['2025-07-10']['contracts']['100|c']['status'], 'invalid')
+        from openpyxl import load_workbook
+        book = load_workbook(self.root / 'archive' / '2507.xlsx')
+        sheet = book.active
+        self.assertEqual([sheet.cell(2, col).fill.fgColor.rgb for col in (1, 4, 6)], ['FFD9D9D9', 'FFD9D9D9', '00000000'])
+        book.close()
+
+    def test_archive_still_refuses_other_gaps(self):
+        for item in ({'status':'missing'}, {'status':'invalid','error':'시가·고가·저가·종가 관계 불일치'}):
+            with self.subTest(item=item):
+                sealed = self.run_archive({'100|c':item, '100|p':{'status':'ok'}})
+                self.assertFalse(sealed.exists())
+
 
 if __name__ == '__main__': unittest.main()

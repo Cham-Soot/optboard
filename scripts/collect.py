@@ -17,6 +17,8 @@ from public_data import assert_public, atomic_json
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
 COMPLETE = {"ok", "no_trade"}
+# The stored price is kept, so this contract stays invalid; archive.py seals it as 확인 필요.
+NO_TRADE_CONFLICT = "기존 시세와 거래량 0 응답이 상충합니다. 기존 값은 보존합니다"
 
 
 class CollectionIncomplete(KisError):
@@ -222,7 +224,7 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
                         existing = next((r for r in doc["rows"] if r["date"] == day
                                          and float(r["strike"]) == float(contract["strike"])), None)
                         if existing and any(v is not None for v in existing[contract["side"]]):
-                            raise ValueError("기존 시세와 거래량 0 응답이 상충합니다. 기존 값은 보존합니다")
+                            raise ValueError(NO_TRADE_CONFLICT)
                 except ValueError as exc:
                     message, status = str(exc), "invalid"
             elif message:
