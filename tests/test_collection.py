@@ -215,6 +215,13 @@ class CollectionTests(unittest.TestCase):
         saved=self.recheck(day,'ok',{**price(day),'close':9},stored=[10,12,8,11])
         self.assertEqual(saved['rows'][0]['c'],[10,12,8,9])
 
+    def test_half_updated_row_does_not_undo_earlier_good_quote(self):
+        day='2026-09-10'
+        saved=self.recheck(day,'ok',{**price(day),'high':3},stored=[10,12,8,11])
+        self.assertEqual(saved['collection'][day]['contracts']['1100|c']['status'],'ok')
+        self.assertEqual(saved['collection'][day]['status'],'complete')
+        self.assertEqual(saved['rows'][0]['c'],[10,12,8,11])
+
     def test_failed_recheck_keeps_verdict_of_recent_day(self):
         day='2026-09-10'
         doc=self.saved_state(day,{'1100|c':{'status':'ok'},'1100|p':{'status':'no_trade'}})

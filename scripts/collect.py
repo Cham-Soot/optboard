@@ -267,8 +267,11 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
                 status = NOT_LISTED
             else:
                 message = "요청 거래일의 응답이 없습니다"
-            if status in ("error", "missing") and previous.get("status") in COMPLETE | {"invalid"}:
-                kept += 1  # A failed re-check says nothing about the earlier verdict.
+            # A failed re-check says nothing about the earlier verdict, and KIS can serve a
+            # half-updated row for the latest session at night.
+            if (status in ("error", "missing") and previous.get("status") in COMPLETE | {"invalid"}) or (
+                    status == "invalid" and message != NO_TRADE_CONFLICT and previous.get("status") == "ok"):
+                kept += 1
                 continue
             item = {"status": status, "checked": checked}
             if message:
