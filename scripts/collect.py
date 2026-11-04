@@ -16,7 +16,9 @@ from public_data import assert_public, atomic_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
-COMPLETE = {"ok", "no_trade"}
+NOT_LISTED = "not_listed"
+COMPLETE = {"ok", "no_trade", NOT_LISTED}
+RECHECK_DAYS = 7
 # The stored price is kept, so this contract stays invalid; archive.py seals it as 확인 필요.
 NO_TRADE_CONFLICT = "기존 시세와 거래량 0 응답이 상충합니다. 기존 값은 보존합니다"
 
@@ -155,8 +157,33 @@ def quote_values(row):
     return values, "ok"
 
 
+def keep_board_strikes(doc, codes):
+    """A strike once on the board stays on every checked day, so a blank can only mean no trade."""
+    states = doc.get("collection", {})
+    strikes = {float(s) for s in doc["strikes"]}
+    for state in states.values():
+        strikes.update(float(c["strike"]) for c in state.get("expected", {}).values())
+    for state in states.values():
+        if not state.get("expected"):
+            continue
+        for strike in strikes:
+            for side in ("c", "p"):
+                code = codes.get(strike, {}).get(side)
+                if code:
+                    state["expected"].setdefault("%g|%s" % (strike, side),
+                                                 {"strike": strike, "side": side, "code": code})
+
+
+def unresolved(item):
+    return item.get("status") not in COMPLETE and item.get("error") != NO_TRADE_CONFLICT
+
+
 def collect_range(api, yyyymm, cfg, dates, repair_only=False):
-    """Query each needed contract once for its entire required date range."""
+    """Query each needed contract once for its entire required date range.
+
+    Days outside `dates` are only revisited for contracts without a verdict; their failures
+    stay in the history report instead of failing the requested days.
+    """
     dates = sorted(set(dates))
     if not dates:
         return 0
@@ -167,7 +194,7 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
     states = doc.setdefault("collection", {})
     unplanned = [day for day in dates if not states.get(day, {}).get("expected")]
     indices = api.index_ohlc(min(unplanned), max(unplanned)) if unplanned and cfg["RANGE_MODE"] == "atm" else {}
-    needed, failures, retryable, touched = {}, [], False, 0
+    needed, failures, retryable, touched, kept = {}, [], False, 0, 0
     checked = kst_now().isoformat(timespec="seconds")
     for day in dates:
         state = states.setdefault(day, {"contracts": {}})
@@ -184,9 +211,14 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
             expected = {"%g|%s" % (strike, side): {"strike": strike, "side": side,
                          "code": codes[strike].get(side)} for strike in picked for side in ("c", "p")}
             state.update(expected=expected, center=center, index_source="KIS KOSPI200 daily" if center else "configured range")
-        for identity, contract in state["expected"].items():
+    keep_board_strikes(doc, codes)
+    for day, state in sorted(states.items()):
+        for identity, contract in state.get("expected", {}).items():
             previous = state.setdefault("contracts", {}).get(identity, {})
-            if repair_only and previous.get("status") in COMPLETE:
+            if day in dates:
+                if repair_only and previous.get("status") in COMPLETE:
+                    continue
+            elif not unresolved(previous):
                 continue
             code = contract.get("code")
             if not code:
@@ -195,7 +227,8 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
                     contract["code"] = code
             if not code:
                 state["contracts"][identity] = {"status": "missing_code", "checked": checked}
-                failures.append(day + ": 종목코드 누락")
+                if day in dates:
+                    failures.append(day + ": 종목코드 누락")
                 continue
             needed.setdefault(code, []).append((day, identity, contract))
 
@@ -217,6 +250,7 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
             state = states[day]
             status, values = "missing", None
             message = error
+            previous = state["contracts"].get(identity, {})
             if not message and day in rows:
                 try:
                     values, status = quote_values(rows[day])
@@ -229,20 +263,28 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
                     message, status = str(exc), "invalid"
             elif message:
                 status = "error"
+            elif rows and day < min(rows) and not previous.get("status"):
+                status = NOT_LISTED
             else:
                 message = "요청 거래일의 응답이 없습니다"
+            if status in ("error", "missing") and previous.get("status") in COMPLETE | {"invalid"}:
+                kept += 1  # A failed re-check says nothing about the earlier verdict.
+                continue
             item = {"status": status, "checked": checked}
             if message:
                 item["error"] = message[:200]
-                failures.append("%s %s: %s" % (day, identity, message))
+                if day in dates:
+                    failures.append("%s %s: %s" % (day, identity, message))
             state["contracts"][identity] = item
-            if status in COMPLETE:
+            if status in ("ok", "no_trade"):
                 upsert(doc, day, contract["strike"], values if contract["side"] == "c" else None,
                        values if contract["side"] == "p" else None)
                 touched += 1
         time.sleep(0.15)
 
-    for day in dates:
+    if kept:
+        print("  [%s] 재확인 응답 없음 %d건 — 기존 판정을 유지합니다" % (yyyymm, kept))
+    for day in sorted(set(dates) | {t[0] for targets in needed.values() for t in targets}):
         state = states[day]
         expected = state.get("expected", {})
         successful = sum(state.get("contracts", {}).get(k, {}).get("status") in COMPLETE for k in expected)
@@ -256,9 +298,15 @@ def collect_range(api, yyyymm, cfg, dates, repair_only=False):
     return touched
 
 
+def recheck_days(doc, date):
+    """KIS adds late trades and corrects closes after the session, so recent days are read again."""
+    since = (dt.date.fromisoformat(date) - dt.timedelta(days=RECHECK_DAYS)).isoformat()
+    return [day for day in doc.get("collection", {}) if since <= day < date]
+
+
 def collect_one(api, yyyymm, cfg, date, use_board=False):
     # Compatible argument, but current quotes are never used, even with True.
-    return collect_range(api, yyyymm, cfg, [date])
+    return collect_range(api, yyyymm, cfg, recheck_days(load_doc(yyyymm, cfg["PRODUCT"]), date) + [date])
 
 
 def heal_missing(api, targets, cfg, today):

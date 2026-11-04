@@ -161,6 +161,96 @@ class CollectionTests(unittest.TestCase):
             collect.heal_missing(self.api,['202610'],CFG,'2026-09-14')
         self.assertEqual(repair.call_args.args[3],[DAY])
 
+    def codes(self):
+        return patch.object(collect,'load_codes',return_value={1100.0:{'c':'C','p':'P'},1200.0:{'c':'X','p':'Y'}})
+
+    def saved_state(self, day, contracts, strikes=(1100.0,)):
+        doc=document();doc['strikes']=list(strikes);doc['dates']=[day]
+        expected={'%g|%s'%(s,side):{'strike':s,'side':side,'code':None} for s in strikes for side in 'cp'}
+        doc['collection']={day:{'status':'complete','expected':expected,'contracts':contracts,'center':1100}}
+        return doc
+
+    def test_strike_that_left_the_range_is_still_collected_and_its_gap_is_filled(self):
+        self.api.index_ohlc.return_value={DAY:1200}
+        doc=self.saved_state('2026-09-01',{'1100|c':{'status':'ok'},'1100|p':{'status':'ok'}})
+        doc['rows']=[{'date':'2026-09-01','strike':1100.0,'c':[1,2,1,2],'p':[1,2,1,2]}]
+        collect.save_doc(doc)
+        self.api.daily_ohlc.side_effect=lambda code,start,end: [row for row in (price('2026-09-01'),price()) if start<=row['date'].replace('-','')<=end]
+        with self.codes():collect.collect_one(self.api,'202610',CFG,DAY)
+        saved=self.read()
+        self.assertEqual(saved['collection'][DAY]['contracts']['1100|c']['status'],'ok')
+        self.assertEqual(saved['collection']['2026-09-01']['contracts']['1200|c']['status'],'ok')
+        self.assertEqual(saved['collection']['2026-09-01']['status'],'complete')
+        self.assertEqual(next(r for r in saved['rows'] if r['date']=='2026-09-01' and r['strike']==1200.0)['c'],[10,12,8,11])
+        self.assertEqual(self.api.daily_ohlc.call_count,4)
+
+    def test_day_before_listing_is_not_a_failure_and_is_not_asked_again(self):
+        collect.save_doc(self.saved_state('2026-08-01',{'1100|c':{'status':'ok'},'1100|p':{'status':'ok'}}))
+        self.api.index_ohlc.return_value={DAY:1200}
+        with self.codes():collect.collect_one(self.api,'202610',CFG,DAY)
+        saved=self.read()
+        self.assertEqual(saved['collection']['2026-08-01']['contracts']['1200|c']['status'],'not_listed')
+        self.assertEqual(saved['collection']['2026-08-01']['status'],'complete')
+        self.assertFalse([r for r in saved['rows'] if r['date']=='2026-08-01' and r['strike']==1200.0])
+        self.api.daily_ohlc.reset_mock()
+        with self.codes():collect.collect_one(self.api,'202610',CFG,DAY)
+        self.assertTrue(all(call.args[1]==DAY.replace('-','') for call in self.api.daily_ohlc.call_args_list))
+
+    def recheck(self, day, status, row, stored=None):
+        doc=self.saved_state(day,{'1100|c':{'status':status},'1100|p':{'status':'no_trade'}})
+        doc['rows']=[{'date':day,'strike':1100.0,'c':stored or [None]*4,'p':[None]*4}]
+        collect.save_doc(doc)
+        self.api.daily_ohlc.side_effect=lambda code,start,end: [row,price()] if code=='C' else [{**price(day),'volume':0},price()]
+        collect.collect_one(self.api,'202610',CFG,DAY)
+        return self.read()
+
+    def test_late_trade_within_recheck_days_replaces_no_trade(self):
+        day='2026-09-10'
+        saved=self.recheck(day,'no_trade',{**price(day),'open':5,'high':5,'low':5,'close':5})
+        self.assertEqual(saved['collection'][day]['contracts']['1100|c']['status'],'ok')
+        self.assertEqual(saved['rows'][0]['c'],[5,5,5,5])
+
+    def test_corrected_close_within_recheck_days_replaces_stored_value(self):
+        day='2026-09-10'
+        saved=self.recheck(day,'ok',{**price(day),'close':9},stored=[10,12,8,11])
+        self.assertEqual(saved['rows'][0]['c'],[10,12,8,9])
+
+    def test_failed_recheck_keeps_verdict_of_recent_day(self):
+        day='2026-09-10'
+        doc=self.saved_state(day,{'1100|c':{'status':'ok'},'1100|p':{'status':'no_trade'}})
+        doc['rows']=[{'date':day,'strike':1100.0,'c':[1,2,1,2],'p':[None]*4}]
+        collect.save_doc(doc)
+        self.api.daily_ohlc.side_effect=KisError('network',retryable=True)
+        with self.assertRaises(collect.CollectionIncomplete):  # today's own quote is in the same query
+            collect.collect_one(self.api,'202610',CFG,DAY)
+        saved=self.read()
+        self.assertEqual(saved['collection'][day]['contracts']['1100|c']['status'],'ok')
+        self.assertEqual(saved['collection'][day]['status'],'complete')
+        self.assertEqual(saved['rows'][0]['c'],[1,2,1,2])
+
+    def test_days_older_than_recheck_are_left_alone_when_settled(self):
+        day='2026-09-01'
+        collect.save_doc(self.saved_state(day,{'1100|c':{'status':'no_trade'},
+                                               '1100|p':{'status':'invalid','error':collect.NO_TRADE_CONFLICT}}))
+        collect.collect_one(self.api,'202610',CFG,DAY)
+        self.assertTrue(all(call.args[1]==DAY.replace('-','') for call in self.api.daily_ohlc.call_args_list))
+        self.assertEqual(self.read()['collection'][day]['contracts']['1100|c']['status'],'no_trade')
+
+    def test_old_unresolved_contract_is_retried_without_failing_today(self):
+        day='2026-09-01'
+        doc=self.saved_state(day,{'1100|c':{'status':'error','error':'network'},'1100|p':{'status':'ok'}})
+        doc['collection'][day]['status']='incomplete'
+        collect.save_doc(doc)
+        code,report=self.run_main(dated=True)
+        self.assertEqual(code,0)
+        self.assertEqual(report['daily'],{'expected_count':2,'complete_count':2})
+        self.assertEqual(report['history']['incomplete_count'],1)
+        self.assertEqual(self.read()['collection'][day]['contracts']['1100|c']['status'],'missing')
+        self.api.daily_ohlc.return_value=[price(day),price()]
+        code,report=self.run_main(dated=True)
+        self.assertEqual(report['history']['incomplete_count'],0)
+        self.assertEqual(self.read()['collection'][day]['status'],'complete')
+
 
 class BoundaryTests(unittest.TestCase):
     def test_public_projection_removes_personal_fields(self):
