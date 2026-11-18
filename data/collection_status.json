@@ -1,1 +1,1 @@
-{"checked":"2026-11-18T03:43:31+09:00","status":"complete","errors":[],"warnings":[],"date":"2026-11-17","targets":["202612","202701"],"daily":{"expected_count":548,"complete_count":548},"history":{"status":"complete","incomplete_count":0,"days":[]}}
+{"checked":"2026-11-19T01:26:25+09:00","date":"2026-11-19","status":"failed","errors":["수집 준비 단계 실패: calendar_sync"],"stage":"calendar_sync"}
